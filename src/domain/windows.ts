@@ -1,0 +1,130 @@
+import { Temporal } from "temporal-polyfill";
+import {
+  MAX_DURATION_MINUTES,
+  MAX_HORIZON_DAYS,
+  MIN_DURATION_MINUTES,
+  STEP_MINUTES,
+} from "../config.ts";
+import { DomainError } from "./errors.ts";
+import {
+  assertTimeZone,
+  durationFromMinutes,
+  iso,
+  parseInterval,
+  spanDays,
+  zonedLocal,
+} from "./time.ts";
+import type { Candidate, Interval, RangeSpec } from "./types.ts";
+
+export function assertDuration(durationMinutes: number): void {
+  if (
+    !Number.isInteger(durationMinutes) ||
+    durationMinutes < MIN_DURATION_MINUTES ||
+    durationMinutes > MAX_DURATION_MINUTES ||
+    durationMinutes % STEP_MINUTES !== 0
+  ) {
+    throw new DomainError(
+      "validation",
+      `Duration must be ${MIN_DURATION_MINUTES}–${MAX_DURATION_MINUTES} minutes in ${STEP_MINUTES}-minute steps.`,
+    );
+  }
+}
+
+export function expandRange(timeZone: string, range: RangeSpec): Interval[] {
+  assertTimeZone(timeZone);
+  let startDate: Temporal.PlainDate;
+  let endDate: Temporal.PlainDate;
+  let dailyStart: Temporal.PlainTime;
+  let dailyEnd: Temporal.PlainTime;
+  try {
+    startDate = Temporal.PlainDate.from(range.startDate);
+    endDate = Temporal.PlainDate.from(range.endDate);
+    dailyStart = Temporal.PlainTime.from(range.dailyStart);
+    dailyEnd = Temporal.PlainTime.from(range.dailyEnd);
+  } catch {
+    throw new DomainError("validation", "Date range fields must use YYYY-MM-DD and HH:mm.");
+  }
+  if (Temporal.PlainDate.compare(endDate, startDate) < 0) {
+    throw new DomainError("validation", "End date must be on or after start date.");
+  }
+  if (range.weekdays.length === 0) {
+    throw new DomainError("validation", "Choose at least one weekday.");
+  }
+  if (range.weekdays.some((day) => day < 1 || day > 7)) {
+    throw new DomainError("validation", "Weekdays must be ISO numbers 1 (Monday) through 7 (Sunday).");
+  }
+  if (Temporal.PlainTime.compare(dailyStart, dailyEnd) === 0) {
+    throw new DomainError("validation", "Daily start and end cannot be the same time.");
+  }
+
+  const overnight = Temporal.PlainTime.compare(dailyEnd, dailyStart) < 0;
+  const excluded = new Set(range.excludeDates ?? []);
+  const windows: Interval[] = [];
+
+  for (let date = startDate; Temporal.PlainDate.compare(date, endDate) <= 0; date = date.add({ days: 1 })) {
+    if (excluded.has(date.toString())) continue;
+    if (!range.weekdays.includes(date.dayOfWeek)) continue;
+    const start = zonedLocal(timeZone, date, dailyStart).toInstant();
+    const endDateForWindow = overnight ? date.add({ days: 1 }) : date;
+    const end = zonedLocal(timeZone, endDateForWindow, dailyEnd).toInstant();
+    windows.push({ start: iso(start), end: iso(end) });
+  }
+
+  if (windows.length === 0) {
+    throw new DomainError("validation", "That date range produced no candidate windows.");
+  }
+  return windows;
+}
+
+export function normalizeWindows(windows: Interval[]): Array<{ start: Temporal.Instant; end: Temporal.Instant }> {
+  if (windows.length === 0) {
+    throw new DomainError("validation", "Provide at least one time window.");
+  }
+  const parsed = windows.map(parseInterval);
+  parsed.sort((a, b) => Temporal.Instant.compare(a.start, b.start));
+  const horizonStart = parsed[0]!.start;
+  const horizonEnd = parsed.reduce(
+    (max, window) => (Temporal.Instant.compare(window.end, max) > 0 ? window.end : max),
+    parsed[0]!.end,
+  );
+  if (spanDays(horizonStart, horizonEnd) > MAX_HORIZON_DAYS) {
+    throw new DomainError(
+      "validation",
+      `Candidate horizon cannot exceed ${MAX_HORIZON_DAYS} days.`,
+    );
+  }
+  return parsed;
+}
+
+export function candidatesInWindows(
+  windows: Interval[],
+  durationMinutes: number,
+  stepMinutes = STEP_MINUTES,
+): Candidate[] {
+  assertDuration(durationMinutes);
+  const duration = durationFromMinutes(durationMinutes);
+  const step = durationFromMinutes(stepMinutes);
+  const parsedWindows = normalizeWindows(windows);
+  const candidates: Candidate[] = [];
+
+  for (const window of parsedWindows) {
+    const lastStart = window.end.subtract(duration);
+    if (Temporal.Instant.compare(lastStart, window.start) < 0) continue;
+    for (
+      let start = window.start;
+      Temporal.Instant.compare(start, lastStart) <= 0;
+      start = start.add(step)
+    ) {
+      const end = start.add(duration);
+      candidates.push({ start: iso(start), end: iso(end) });
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new DomainError(
+      "validation",
+      `No ${durationMinutes}-minute meeting fits entirely inside the offered windows.`,
+    );
+  }
+  return candidates;
+}
