@@ -510,6 +510,20 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
             required: ["start", "end", "eventVersion", "resultsVersion"],
           },
         },
+        {
+          name: "close_poll",
+          description: "Close collection without choosing a time.",
+          method: "POST",
+          path: `${path}/close`,
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: "delete_poll",
+          description: "Delete this poll.",
+          method: "POST",
+          path: `${path}/delete`,
+          inputSchema: { type: "object", properties: {} },
+        },
       ])}
     >
       <h1>{props.event.title}</h1>
@@ -610,6 +624,11 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           </button>
         </form>
       ) : null}
+      <form method="post" action={`/o/${props.organizerToken}/delete`}>
+        <button class="secondary" type="submit">
+          Delete poll
+        </button>
+      </form>
     </Layout>
   );
 }

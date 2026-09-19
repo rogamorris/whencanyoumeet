@@ -52,6 +52,12 @@ export function openApiDocument(serverUrl: string) {
       "/api/organizer/{token}/cancel": {
         post: { summary: "Cancel", operationId: "cancelPoll" },
       },
+      "/api/organizer/{token}/close": {
+        post: { summary: "Close without a decision", operationId: "closePoll" },
+      },
+      "/api/organizer/{token}/delete": {
+        post: { summary: "Delete poll", operationId: "deletePoll" },
+      },
     },
     components: {
       schemas: {

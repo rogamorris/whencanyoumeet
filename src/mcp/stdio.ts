@@ -37,12 +37,8 @@ const remoteCommands = {
     api("POST", `/api/responses/${token}/withdraw`, { responseVersion: version }),
   finalize: (input) => api("POST", `/api/organizer/${input.organizerToken}/finalize`, input),
   cancel: (token) => api("POST", `/api/organizer/${token}/cancel`),
-  close: async () => {
-    throw new DomainError("validation", "Use the organizer HTTP API to close without a decision.");
-  },
-  deletePoll: async () => {
-    throw new DomainError("validation", "Use the organizer HTTP API to delete.");
-  },
+  close: (token) => api("POST", `/api/organizer/${token}/close`),
+  deletePoll: (token) => api("POST", `/api/organizer/${token}/delete`),
 } satisfies Commands;
 
 serveStdio(() => {

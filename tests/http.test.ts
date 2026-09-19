@@ -159,6 +159,20 @@ describe("http slice", () => {
     expect(replayBody.publicId).toBe(poll.publicId);
     expect(replayBody.organizerToken).toBe(poll.organizerToken);
 
+    const reordered = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "k1" },
+      body: JSON.stringify({
+        range,
+        timezone: "America/New_York",
+        durationMinutes: 60,
+        title: "Outside",
+      }),
+    });
+    expect(reordered.status).toBe(201);
+    const reorderedBody = (await reordered.json()) as { organizerToken: string };
+    expect(reorderedBody.organizerToken).toBe(poll.organizerToken);
+
     const clash = await hono.request("/api/polls", {
       method: "POST",
       headers: { "content-type": "application/json", "Idempotency-Key": "k1" },

@@ -11,6 +11,8 @@ import { createCommands } from "./domain/commands.ts";
 import { toIcs } from "./domain/ics.ts";
 import { DomainError } from "./domain/errors.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
+import type { CreatePollResult } from "./domain/types.ts";
+import { parseIdempotencyRecord, requestHash } from "./http/idempotency.ts";
 import {
   CreatePage,
   displayTimeZone,
@@ -144,15 +146,27 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/api/polls", async (c) => {
     try {
+      const parsed = createPollSchema.parse(await c.req.json());
       const idem = c.req.header("Idempotency-Key");
       if (idem) {
-        const existing = await store.getIdempotency(`create:${idem}`);
-        if (existing) return c.json(JSON.parse(existing), 201);
+        const key = `create:${idem}`;
+        const hash = requestHash(parsed);
+        const existing = await store.getIdempotency(key);
+        if (existing) {
+          const record = parseIdempotencyRecord<CreatePollResult>(existing);
+          if (record && record.requestHash === hash) {
+            return c.json(record.result, 201);
+          }
+          throw new DomainError(
+            "conflict",
+            "Idempotency-Key already used with a different request.",
+          );
+        }
+        const created = await commands.createPoll(parsed);
+        await store.saveIdempotency(key, JSON.stringify({ requestHash: hash, result: created }));
+        return c.json(created, 201);
       }
-      const parsed = createPollSchema.parse(await c.req.json());
-      const created = await commands.createPoll(parsed);
-      if (idem) await store.saveIdempotency(`create:${idem}`, JSON.stringify(created));
-      return c.json(created, 201);
+      return c.json(await commands.createPoll(parsed), 201);
     } catch (error) {
       if (error instanceof z.ZodError) {
         return c.json({ error: { code: "validation", message: error.message } }, 400);
@@ -254,11 +268,11 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/r/:token/withdraw", (c) =>
     handle(c, async () => {
       const body = await readForm(c);
-      const result = await commands.withdrawResponse(
+      await commands.withdrawResponse(
         c.req.param("token"),
         Number(formString(body.responseVersion)),
       );
-      return c.html(<ErrorPage message={result.receipt} status={200} />);
+      return c.redirect(`/r/${c.req.param("token")}`, 303);
     }),
   );
 
@@ -333,6 +347,29 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       return c.redirect(`/o/${c.req.param("token")}`, 303);
     }),
   );
+
+  app.post("/api/organizer/:token/close", async (c) => {
+    try {
+      return c.json(await commands.close(c.req.param("token")));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
+
+  app.post("/o/:token/delete", (c) =>
+    handle(c, async () => {
+      await commands.deletePoll(c.req.param("token"));
+      return c.redirect("/", 303);
+    }),
+  );
+
+  app.post("/api/organizer/:token/delete", async (c) => {
+    try {
+      return c.json(await commands.deletePoll(c.req.param("token")));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
 
   app.get("/o/:token/event.ics", (c) =>
     handle(c, async () => {
