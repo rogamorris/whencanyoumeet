@@ -183,6 +183,34 @@ describe("http slice", () => {
     expect(html).toContain(`value="${range.startDate}"`);
     expect(html).toContain(`value="${range.endDate}"`);
     expect(html).not.toContain('type="date"');
+    expect(html).not.toContain('type="time"');
+  });
+
+  it("keeps every checked weekday from the HTML form", async () => {
+    const hono = await app();
+    const created = await hono.request("/polls", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams([
+        ["title", "Full week"],
+        ["durationMinutes", "60"],
+        ["timezone", "America/New_York"],
+        ["startDate", "2026-09-21"],
+        ["endDate", "2026-09-25"],
+        ["weekday", "1"],
+        ["weekday", "2"],
+        ["weekday", "3"],
+        ["weekday", "4"],
+        ["weekday", "5"],
+        ["dailyStart", "09:00"],
+        ["dailyEnd", "10:00"],
+      ]),
+    });
+    expect(created.status).toBe(303);
+    const organizerToken = created.headers.get("location")!.split("/o/")[1]!;
+    const organizer = await hono.request(`/api/organizer/${organizerToken}`);
+    const body = (await organizer.json()) as { candidates: unknown[] };
+    expect(body.candidates).toHaveLength(5);
   });
 
   it("creates, answers, and finalizes through HTML with 303 redirects", async () => {

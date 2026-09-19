@@ -96,7 +96,10 @@ export function expandRange(timeZone: string, range: RangeSpec): Interval[] {
   }
 
   if (windows.length === 0) {
-    throw new DomainError("validation", "That date range produced no candidate windows.");
+    throw new DomainError(
+      "validation",
+      "None of the selected weekdays fall between those dates.",
+    );
   }
   return windows;
 }

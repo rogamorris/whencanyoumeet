@@ -133,14 +133,38 @@ export function CreatePage(props: { timezone: string; range: DateRangeDefaults }
           {weekdayBoxes()}
         </fieldset>
         <label>
-          Daily start
+          Daily start (HH:mm)
           <br />
-          <input id="dailyStart" name="dailyStart" type="time" value="09:00" required />
+          <input
+            id="dailyStart"
+            name="dailyStart"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            spellcheck={false}
+            pattern="\d{2}:\d{2}"
+            placeholder="HH:mm"
+            title="HH:mm 24-hour time"
+            value="09:00"
+            required
+          />
         </label>
         <label>
-          Daily end
+          Daily end (HH:mm)
           <br />
-          <input id="dailyEnd" name="dailyEnd" type="time" value="18:00" required />
+          <input
+            id="dailyEnd"
+            name="dailyEnd"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            spellcheck={false}
+            pattern="\d{2}:\d{2}"
+            placeholder="HH:mm"
+            title="HH:mm 24-hour time"
+            value="18:00"
+            required
+          />
         </label>
         <label>
           Optional context

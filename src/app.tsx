@@ -32,6 +32,10 @@ import { openApiDocument } from "./http/openapi.ts";
 import { PUBLIC_BASE_URL } from "./config.ts";
 import { upcomingWeekdayRange } from "./domain/windows.ts";
 
+async function readForm(c: Context) {
+  return c.req.parseBody({ all: true });
+}
+
 function formString(value: unknown): string {
   if (typeof value === "string") return value;
   return "";
@@ -120,7 +124,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/polls", (c) =>
     handle(c, async () => {
-      const body = await c.req.parseBody();
+      const body = await readForm(c);
       const created = await commands.createPoll({
         title: formString(body.title),
         context: formString(body.context) || undefined,
@@ -178,7 +182,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/p/:publicId/responses", (c) =>
     handle(c, async () => {
-      const body = await c.req.parseBody();
+      const body = await readForm(c);
       const result = await commands.submitAvailability({
         publicId: c.req.param("publicId"),
         name: formString(body.name),
@@ -222,7 +226,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/r/:token", (c) =>
     handle(c, async () => {
-      const body = await c.req.parseBody();
+      const body = await readForm(c);
       await commands.updateAvailability({
         responseToken: c.req.param("token"),
         responseVersion: Number(formString(body.responseVersion)),
@@ -249,7 +253,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/r/:token/withdraw", (c) =>
     handle(c, async () => {
-      const body = await c.req.parseBody();
+      const body = await readForm(c);
       const result = await commands.withdrawResponse(
         c.req.param("token"),
         Number(formString(body.responseVersion)),
@@ -287,7 +291,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/o/:token/finalize", (c) =>
     handle(c, async () => {
-      const body = await c.req.parseBody();
+      const body = await readForm(c);
       await commands.finalize({
         organizerToken: c.req.param("token"),
         start: formString(body.start),
