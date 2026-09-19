@@ -16,6 +16,31 @@ import {
 } from "./time.ts";
 import type { Candidate, Interval, RangeSpec } from "./types.ts";
 
+export function upcomingWeekdayRange(
+  timeZone: string,
+  options?: { weekdayCount?: number; from?: Temporal.PlainDate },
+): { startDate: string; endDate: string; minDate: string; maxDate: string } {
+  assertTimeZone(timeZone);
+  const weekdayCount = options?.weekdayCount ?? 5;
+  const from = options?.from ?? Temporal.Now.zonedDateTimeISO(timeZone).toPlainDate();
+  let start = from;
+  while (start.dayOfWeek > 5) {
+    start = start.add({ days: 1 });
+  }
+  let remaining = Math.max(1, weekdayCount) - 1;
+  let end = start;
+  while (remaining > 0) {
+    end = end.add({ days: 1 });
+    if (end.dayOfWeek <= 5) remaining -= 1;
+  }
+  return {
+    startDate: start.toString(),
+    endDate: end.toString(),
+    minDate: from.toString(),
+    maxDate: from.add({ days: MAX_HORIZON_DAYS }).toString(),
+  };
+}
+
 export function assertDuration(durationMinutes: number): void {
   if (
     !Number.isInteger(durationMinutes) ||

@@ -24,7 +24,7 @@ pnpm test
 pnpm dev
 ```
 
-Open `http://127.0.0.1:8080`. Data is stored in `data/when.db` (PGlite).
+Open `http://127.0.0.1:8080`. Data is stored in `data/when.db` (PGlite). `pnpm dev` does not watch files, so writing polls cannot restart the process. Use `pnpm dev:watch` only when iterating on source; it ignores `data/`.
 
 ### MCP
 

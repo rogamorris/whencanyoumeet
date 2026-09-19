@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { createApp } from "../src/app.tsx";
+import { upcomingWeekdayRange } from "../src/domain/windows.ts";
 
 const range = {
   startDate: "2026-09-21",
@@ -168,6 +172,123 @@ describe("http slice", () => {
       }),
     });
     expect(bad.status).toBe(400);
+  });
+
+  it("prefills ISO weekday dates on the create form", async () => {
+    const hono = await app();
+    const page = await hono.request("/");
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    const range = upcomingWeekdayRange("America/New_York");
+    expect(html).toContain(`value="${range.startDate}"`);
+    expect(html).toContain(`value="${range.endDate}"`);
+    expect(html).not.toContain('type="date"');
+  });
+
+  it("creates, answers, and finalizes through HTML with 303 redirects", async () => {
+    const hono = await app();
+    const created = await hono.request("/polls", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        title: "HTML loop",
+        durationMinutes: "60",
+        timezone: "America/New_York",
+        startDate: "2026-09-21",
+        endDate: "2026-09-21",
+        weekday: "1",
+        dailyStart: "09:00",
+        dailyEnd: "12:00",
+      }),
+    });
+    expect(created.status).toBe(303);
+    const organizerUrl = created.headers.get("location");
+    expect(organizerUrl).toMatch(/\/o\/.+/);
+    const organizerToken = organizerUrl!.split("/o/")[1]!;
+
+    const organizerPage = await hono.request(`/o/${organizerToken}`);
+    expect(organizerPage.status).toBe(200);
+    const organizerHtml = await organizerPage.text();
+    expect(organizerHtml).toContain("/p/");
+    expect(organizerHtml).toContain("HTML loop");
+
+    const listed = await hono.request(`/api/organizer/${organizerToken}`);
+    const results = (await listed.json()) as {
+      publicId: string;
+      eventVersion: number;
+      resultsVersion: number;
+      candidates: Array<{ start: string; end: string }>;
+    };
+    const slot = results.candidates[0]!;
+    const answered = await hono.request(`/p/${results.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        name: "Alex",
+        remainderUnavailable: "true",
+        [`slot:${slot.start}|${slot.end}`]: "available",
+      }),
+    });
+    expect(answered.status).toBe(303);
+    expect(answered.headers.get("location")).toMatch(/\/r\/.+/);
+
+    const afterAnswer = await hono.request(`/api/organizer/${organizerToken}`);
+    const tallied = (await afterAnswer.json()) as {
+      eventVersion: number;
+      resultsVersion: number;
+      participants: unknown[];
+    };
+    expect(tallied.participants).toHaveLength(1);
+
+    const finalized = await hono.request(`/o/${organizerToken}/finalize`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        start: slot.start,
+        end: slot.end,
+        eventVersion: String(tallied.eventVersion),
+        resultsVersion: String(tallied.resultsVersion),
+      }),
+    });
+    expect(finalized.status).toBe(303);
+    expect(finalized.headers.get("location")).toMatch(/\/o\/.+/);
+
+    const publicPage = await hono.request(`/p/${results.publicId}`);
+    const publicHtml = await publicPage.text();
+    expect(publicHtml).toContain("Chosen time:");
+    expect(publicHtml).not.toContain(organizerToken);
+  });
+
+  it("reopens a poll from a PGlite data directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "when-"));
+    try {
+      const first = new PGlite({ dataDir: dir });
+      clients.push(first);
+      const app1 = await createApp({ client: first, publicBaseUrl: "http://127.0.0.1:8080" });
+      const created = await app1.request("/api/polls", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Persisted",
+          durationMinutes: 60,
+          timezone: "America/New_York",
+          range,
+        }),
+      });
+      const poll = (await created.json()) as { publicId: string };
+      await first.close();
+      clients.splice(clients.indexOf(first), 1);
+
+      const second = new PGlite({ dataDir: dir });
+      clients.push(second);
+      const app2 = await createApp({ client: second, publicBaseUrl: "http://127.0.0.1:8080" });
+      const got = await app2.request(`/api/polls/${poll.publicId}`);
+      expect(got.status).toBe(200);
+      const body = (await got.json()) as { title: string };
+      expect(body.title).toBe("Persisted");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("lists MCP tools", async () => {

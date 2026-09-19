@@ -5,6 +5,13 @@ import type { Candidate, OrganizerEvent, PublicEvent, ParticipantView } from "..
 import { DomainError } from "../domain/errors.ts";
 import { webmcpScript } from "./webmcp.ts";
 
+export type DateRangeDefaults = {
+  startDate: string;
+  endDate: string;
+  minDate: string;
+  maxDate: string;
+};
+
 const css = `
   :root { font-family: ui-sans-serif, system-ui, sans-serif; color: #111; background: #f6f4ef; }
   body { margin: 0; }
@@ -47,7 +54,7 @@ export const Layout: FC<
   </html>
 );
 
-export function CreatePage() {
+export function CreatePage(props: { timezone: string; range: DateRangeDefaults }) {
   return (
     <Layout title="When Can You Meet">
       <h1>Find a time</h1>
@@ -55,32 +62,72 @@ export function CreatePage() {
         Create a poll. Share one public link. People or their agents answer. You choose a time. This
         service never reads calendars and does not send invitations.
       </p>
-      <form method="post" action="/polls" class="card">
+      <form method="post" action="/polls" class="card" id="create-poll">
         <label>
           Title
           <br />
-          <input name="title" required maxlength={200} style="width:100%" />
+          <input id="title" name="title" required maxlength={200} style="width:100%" />
         </label>
         <label>
           Duration (minutes)
           <br />
-          <input name="durationMinutes" type="number" min={15} max={240} step={15} value={60} />
+          <input
+            id="durationMinutes"
+            name="durationMinutes"
+            type="number"
+            min={15}
+            max={240}
+            step={15}
+            value={60}
+          />
         </label>
         <label>
           Time zone
           <br />
-          <input name="timezone" value="America/New_York" required />
+          <input id="timezone" name="timezone" value={props.timezone} required />
         </label>
         <label>
-          First date
+          First date (YYYY-MM-DD)
           <br />
-          <input name="startDate" type="date" required />
+          <input
+            id="startDate"
+            name="startDate"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            spellcheck={false}
+            pattern="\d{4}-\d{2}-\d{2}"
+            placeholder="YYYY-MM-DD"
+            title="YYYY-MM-DD"
+            min={props.range.minDate}
+            max={props.range.maxDate}
+            value={props.range.startDate}
+            required
+          />
         </label>
         <label>
-          Last date
+          Last date (YYYY-MM-DD)
           <br />
-          <input name="endDate" type="date" required />
+          <input
+            id="endDate"
+            name="endDate"
+            type="text"
+            inputmode="numeric"
+            autocomplete="off"
+            spellcheck={false}
+            pattern="\d{4}-\d{2}-\d{2}"
+            placeholder="YYYY-MM-DD"
+            title="YYYY-MM-DD"
+            min={props.range.minDate}
+            max={props.range.maxDate}
+            value={props.range.endDate}
+            required
+          />
         </label>
+        <p class="muted">
+          Prefills the next five weekdays: {props.range.startDate} through {props.range.endDate}.
+          Use ISO calendar dates.
+        </p>
         <fieldset>
           <legend>Weekdays</legend>
           {weekdayBoxes()}
@@ -88,19 +135,19 @@ export function CreatePage() {
         <label>
           Daily start
           <br />
-          <input name="dailyStart" type="time" value="09:00" required />
+          <input id="dailyStart" name="dailyStart" type="time" value="09:00" required />
         </label>
         <label>
           Daily end
           <br />
-          <input name="dailyEnd" type="time" value="18:00" required />
+          <input id="dailyEnd" name="dailyEnd" type="time" value="18:00" required />
         </label>
         <label>
           Optional context
           <br />
-          <textarea name="context" rows={2} style="width:100%"></textarea>
+          <textarea id="context" name="context" rows={2} style="width:100%"></textarea>
         </label>
-        <button type="submit">Create poll</button>
+        <button id="create-submit" type="submit">Create poll</button>
       </form>
       <p class="muted">
         Agents: <a href="/llms.txt">llms.txt</a>, <a href="/openapi.json">OpenAPI</a>, MCP at{" "}
@@ -230,7 +277,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
           <label>
             Your name
             <br />
-            <input name="name" required maxlength={80} />
+            <input id="respondent-name" name="name" required maxlength={80} />
           </label>
           {groups.map(([day, slots]) => (
             <section class="day">
@@ -265,7 +312,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
             slot as unavailable
           </label>
           <p class="muted">Unselected times stay unknown unless you check that box.</p>
-          <button type="submit">Submit availability</button>
+          <button id="submit-availability" type="submit">Submit availability</button>
         </form>
       ) : null}
     </Layout>
@@ -343,6 +390,9 @@ export function ParticipantPage(props: {
       ])}
     >
       <h1>{props.event.title}</h1>
+      <div class="warn">
+        This response URL is a private capability. A display name cannot recover it. Bookmark it.
+      </div>
       <p>
         Editing as {props.event.displayName}. Response version {props.event.responseVersion}.
       </p>
@@ -439,9 +489,19 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
       ])}
     >
       <h1>{props.event.title}</h1>
+      <div class="warn">
+        This organizer URL is a private capability. It is not on the public page. Bookmark it.
+      </div>
       <p>
         Status: {props.event.status}. Event v{props.event.eventVersion}, results v
         {props.event.resultsVersion}.
+      </p>
+      <p>
+        <strong>Public invitation</strong>
+        <br />
+        <a class="secret" id="public-invitation" href={`/p/${props.event.publicId}`}>
+          {`/p/${props.event.publicId}`}
+        </a>
       </p>
       <p class="muted">{props.event.language}</p>
       {props.event.finalized ? (
@@ -503,7 +563,7 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
                         name="resultsVersion"
                         value={String(props.event.resultsVersion)}
                       />
-                      <button type="submit">Choose</button>
+                      <button type="submit" class="choose-slot">Choose</button>
                     </form>
                   ) : null}
                 </td>

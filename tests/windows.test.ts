@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { DomainError } from "../src/domain/errors.ts";
-import { candidatesInWindows, expandRange } from "../src/domain/windows.ts";
+import { candidatesInWindows, expandRange, upcomingWeekdayRange } from "../src/domain/windows.ts";
 
 describe("window expansion", () => {
+  it("defaults to the next five weekdays", async () => {
+    const { Temporal } = await import("temporal-polyfill");
+    const saturday = Temporal.PlainDate.from("2026-09-19");
+    expect(upcomingWeekdayRange("America/New_York", { from: saturday })).toEqual({
+      startDate: "2026-09-21",
+      endDate: "2026-09-25",
+      minDate: "2026-09-19",
+      maxDate: "2026-11-18",
+    });
+    const wednesday = Temporal.PlainDate.from("2026-09-23");
+    expect(upcomingWeekdayRange("America/New_York", { from: wednesday }).startDate).toBe(
+      "2026-09-23",
+    );
+    expect(upcomingWeekdayRange("America/New_York", { from: wednesday }).endDate).toBe("2026-09-29");
+  });
+
   it("builds weekday windows in the authored zone", () => {
     const windows = expandRange("America/New_York", {
       startDate: "2026-09-21",

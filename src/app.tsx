@@ -13,14 +13,12 @@ import { DomainError } from "./domain/errors.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
 import {
   CreatePage,
-  CreatedPage,
   displayTimeZone,
   ErrorPage,
   InvitationPage,
   OrganizerPage,
   parseSlotFields,
   ParticipantPage,
-  SavedResponsePage,
 } from "./http/pages.tsx";
 import {
   createPollSchema,
@@ -32,6 +30,7 @@ import {
 import { registerMcpTools } from "./mcp/tools.ts";
 import { openApiDocument } from "./http/openapi.ts";
 import { PUBLIC_BASE_URL } from "./config.ts";
+import { upcomingWeekdayRange } from "./domain/windows.ts";
 
 function formString(value: unknown): string {
   if (typeof value === "string") return value;
@@ -114,7 +113,10 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 `),
   );
 
-  app.get("/", (c) => c.html(<CreatePage />));
+  app.get("/", (c) => {
+    const timezone = "America/New_York";
+    return c.html(<CreatePage timezone={timezone} range={upcomingWeekdayRange(timezone)} />);
+  });
 
   app.post("/polls", (c) =>
     handle(c, async () => {
@@ -132,10 +134,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
           dailyEnd: formString(body.dailyEnd),
         },
       });
-      return c.html(
-        <CreatedPage publicUrl={created.publicUrl} organizerUrl={created.organizerUrl} />,
-        201,
-      );
+      return c.redirect(created.organizerUrl, 303);
     }),
   );
 
@@ -186,7 +185,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
       });
-      return c.html(<SavedResponsePage responseUrl={result.responseUrl} receipt={result.receipt} />, 201);
+      return c.redirect(result.responseUrl, 303);
     }),
   );
 
@@ -230,7 +229,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
       });
-      return c.redirect(`/r/${c.req.param("token")}`);
+      return c.redirect(`/r/${c.req.param("token")}`, 303);
     }),
   );
 
@@ -296,7 +295,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         eventVersion: Number(formString(body.eventVersion)),
         resultsVersion: Number(formString(body.resultsVersion)),
       });
-      return c.redirect(`/o/${c.req.param("token")}`);
+      return c.redirect(`/o/${c.req.param("token")}`, 303);
     }),
   );
 
@@ -312,7 +311,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/o/:token/cancel", (c) =>
     handle(c, async () => {
       await commands.cancel(c.req.param("token"));
-      return c.redirect(`/o/${c.req.param("token")}`);
+      return c.redirect(`/o/${c.req.param("token")}`, 303);
     }),
   );
 
@@ -327,7 +326,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/o/:token/close", (c) =>
     handle(c, async () => {
       await commands.close(c.req.param("token"));
-      return c.redirect(`/o/${c.req.param("token")}`);
+      return c.redirect(`/o/${c.req.param("token")}`, 303);
     }),
   );
 
