@@ -1462,6 +1462,83 @@ describe("http slice", () => {
     };
     expect(organizer.participants).toHaveLength(1);
   });
+
+  it("returns 404 instead of the stored receipt when submit, update, or withdraw is replayed after the poll is deleted", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Deleted before retry",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string; eventVersion: number; organizerToken: string };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const publicEvent = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    const slot = publicEvent.candidates[0]!;
+
+    const submitHeaders = { "content-type": "application/json", "Idempotency-Key": "submit-then-delete" };
+    const submitBody = JSON.stringify({
+      name: "Sam",
+      eventVersion: poll.eventVersion,
+      remainderUnavailable: true,
+      intervals: [{ ...slot, state: "available" }],
+    });
+    const submitted = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: submitHeaders,
+      body: submitBody,
+    });
+    expect(submitted.status).toBe(201);
+    const { responseToken } = (await submitted.json()) as { responseToken: string };
+
+    const updateHeaders = { "content-type": "application/json", "Idempotency-Key": "update-then-delete" };
+    const updateBody = JSON.stringify({
+      responseVersion: 1,
+      eventVersion: poll.eventVersion,
+      remainderUnavailable: true,
+      intervals: [{ ...slot, state: "tentative" }],
+    });
+    const updated = await hono.request(`/api/responses/${responseToken}`, {
+      method: "PATCH",
+      headers: updateHeaders,
+      body: updateBody,
+    });
+    expect(updated.status).toBe(200);
+
+    const withdrawHeaders = { "content-type": "application/json", "Idempotency-Key": "withdraw-then-delete" };
+    const withdrawBody = JSON.stringify({ responseVersion: 2 });
+    const withdrawn = await hono.request(`/api/responses/${responseToken}/withdraw`, {
+      method: "POST",
+      headers: withdrawHeaders,
+      body: withdrawBody,
+    });
+    expect(withdrawn.status).toBe(200);
+
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/delete`, { method: "POST" })).status,
+    ).toBe(200);
+
+    const replays = await Promise.all([
+      hono.request(`/api/polls/${poll.publicId}/responses`, { method: "POST", headers: submitHeaders, body: submitBody }),
+      hono.request(`/api/responses/${responseToken}`, { method: "PATCH", headers: updateHeaders, body: updateBody }),
+      hono.request(`/api/responses/${responseToken}/withdraw`, {
+        method: "POST",
+        headers: withdrawHeaders,
+        body: withdrawBody,
+      }),
+    ]);
+    for (const replay of replays) {
+      expect(replay.status).toBe(404);
+      const text = await replay.text();
+      expect(text).not.toContain(responseToken);
+      expect(JSON.parse(text)).toEqual({ error: { code: "not_found", message: expect.any(String) } });
+    }
+    expect((await hono.request(`/api/polls/${poll.publicId}`)).status).toBe(404);
+  });
 });
 
 function mcpStructured<T>(sse: string): T {
