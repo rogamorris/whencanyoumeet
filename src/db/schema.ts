@@ -32,6 +32,7 @@ export const participants = pgTable("participants", {
   displayName: text("display_name").notNull(),
   responseTokenHash: text("response_token_hash").notNull().unique(),
   coverageMode: text("coverage_mode").notNull(),
+  evaluated: text("evaluated").notNull(),
   withdrawn: boolean("withdrawn").notNull(),
   responseVersion: integer("response_version").notNull(),
   createdAt: text("created_at").notNull(),
