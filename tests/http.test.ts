@@ -63,6 +63,7 @@ describe("http slice", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         name: "Alex",
+        eventVersion: poll.eventVersion,
         remainderUnavailable: true,
         intervals: [{ ...slot, state: "available" }],
       }),
@@ -74,6 +75,7 @@ describe("http slice", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         name: "Alex",
+        eventVersion: poll.eventVersion,
         remainderUnavailable: true,
         intervals: [{ ...slot, state: "unavailable" }],
       }),
@@ -119,14 +121,18 @@ describe("http slice", () => {
     const after = await hono.request(`/api/polls/${poll.publicId}/responses`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Sam", intervals: [] }),
+      body: JSON.stringify({ name: "Sam", eventVersion: poll.eventVersion, intervals: [] }),
     });
     expect(after.status).toBe(409);
 
     const retry = await hono.request(`/api/responses/${secondBody.responseToken}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ responseVersion: secondBody.responseVersion, intervals: [] }),
+      body: JSON.stringify({
+        responseVersion: secondBody.responseVersion,
+        eventVersion: poll.eventVersion,
+        intervals: [],
+      }),
     });
     expect(retry.status).toBe(409);
   });
@@ -143,7 +149,11 @@ describe("http slice", () => {
         range,
       }),
     });
-    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    const poll = (await created.json()) as {
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    };
     const replay = await hono.request("/api/polls", {
       method: "POST",
       headers: { "content-type": "application/json", "Idempotency-Key": "k1" },
@@ -195,6 +205,7 @@ describe("http slice", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         name: "Pat",
+        eventVersion: poll.eventVersion,
         intervals: [
           {
             start: "2026-09-22T13:00:00Z",
@@ -286,6 +297,7 @@ describe("http slice", () => {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         name: "Alex",
+        eventVersion: String(results.eventVersion),
         remainderUnavailable: "true",
         [`slot:${slot.start}|${slot.end}`]: "available",
       }),
@@ -369,6 +381,8 @@ describe("http slice", () => {
     expect(text).toContain("finalize_poll");
     expect(text).toContain("close_poll");
     expect(text).toContain("delete_poll");
+    expect(text).toContain("update_event");
+    expect(text).toContain("reopen_poll");
   });
 
   it("redirects HTML withdraw onto the response URL", async () => {
@@ -392,6 +406,7 @@ describe("http slice", () => {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         name: "Alex",
+        eventVersion: "1",
         remainderUnavailable: "true",
         [`slot:${slot.start}|${slot.end}`]: "available",
       }),
@@ -447,7 +462,7 @@ describe("http slice", () => {
     const late = await hono.request(`/api/polls/${poll.publicId}/responses`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Sam", intervals: [] }),
+      body: JSON.stringify({ name: "Sam", eventVersion: 1, intervals: [] }),
     });
     expect(late.status).toBe(409);
 
@@ -582,6 +597,7 @@ describe("http slice", () => {
           arguments: {
             publicId: created.publicId,
             name: "Alex",
+            eventVersion: created.eventVersion,
             remainderUnavailable: true,
             intervals: [
               {
@@ -638,6 +654,400 @@ describe("http slice", () => {
       start: "2026-09-21T13:00:00Z",
       end: "2026-09-21T14:00:00Z",
     });
+  });
+
+  it("reopens a closed poll so collection can continue", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Reopen me",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/close`, { method: "POST" })).status,
+    ).toBe(200);
+
+    const organizerPage = await hono.request(`/o/${poll.organizerToken}`);
+    expect(await organizerPage.text()).toContain(`/o/${poll.organizerToken}/reopen`);
+
+    const reopened = await hono.request(`/api/organizer/${poll.organizerToken}/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toEqual({
+      receipt: "Collection reopened. Participants can answer again.",
+    });
+
+    const again = await hono.request(`/api/organizer/${poll.organizerToken}/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(again.status).toBe(200);
+
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const publicEvent = (await listed.json()) as {
+      status: string;
+      candidates: Array<{ start: string; end: string }>;
+    };
+    expect(publicEvent.status).toBe("open");
+    const slot = publicEvent.candidates[0]!;
+    const submitted = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Alex",
+        eventVersion: 1,
+        remainderUnavailable: true,
+        intervals: [{ ...slot, state: "available" }],
+      }),
+    });
+    expect(submitted.status).toBe(201);
+  });
+
+  it("keeps remainder unknown on windows added after the response", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Widen",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as {
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const event = (await listed.json()) as {
+      windows: Array<{ start: string; end: string }>;
+      candidates: Array<{ start: string; end: string }>;
+    };
+    const slot = event.candidates[0]!;
+    expect(
+      (
+        await hono.request(`/api/polls/${poll.publicId}/responses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "Alex",
+            eventVersion: poll.eventVersion,
+            remainderUnavailable: true,
+            intervals: [{ ...slot, state: "available" }],
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    const extra = { start: "2026-09-22T13:00:00Z", end: "2026-09-22T16:00:00Z" };
+    const updated = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        eventVersion: poll.eventVersion,
+        windows: [...event.windows, extra],
+      }),
+    });
+    expect(updated.status).toBe(200);
+    const body = (await updated.json()) as { eventVersion: number; constraintsChanged: boolean };
+    expect(body.eventVersion).toBe(2);
+    expect(body.constraintsChanged).toBe(true);
+
+    const organizer = (await (
+      await hono.request(`/api/organizer/${poll.organizerToken}`)
+    ).json()) as {
+      eventVersion: number;
+      tallies: Array<{ start: string; available: number; unknown: number; unavailable: number }>;
+    };
+    expect(organizer.eventVersion).toBe(2);
+    const original = organizer.tallies.find((row) => row.start === slot.start);
+    expect(original).toEqual(expect.objectContaining({ available: 1, unknown: 0, unavailable: 0 }));
+    const added = organizer.tallies.find((row) => row.start.startsWith("2026-09-22"));
+    expect(added).toEqual(expect.objectContaining({ available: 0, unknown: 1, unavailable: 0 }));
+  });
+
+  it("does not inherit a yes onto a shorter duration", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Shorter",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as {
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const event = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    expect(
+      (
+        await hono.request(`/api/polls/${poll.publicId}/responses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "Alex",
+            eventVersion: poll.eventVersion,
+            intervals: [{ ...event.candidates[0]!, state: "available" }],
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    const updated = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventVersion: poll.eventVersion, durationMinutes: 30 }),
+    });
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toEqual(
+      expect.objectContaining({ eventVersion: 2, constraintsChanged: true }),
+    );
+
+    const organizer = (await (
+      await hono.request(`/api/organizer/${poll.organizerToken}`)
+    ).json()) as {
+      durationMinutes: number;
+      tallies: Array<{ available: number; unknown: number; fullSupport: boolean }>;
+    };
+    expect(organizer.durationMinutes).toBe(30);
+    expect(organizer.tallies.length).toBeGreaterThan(0);
+    expect(organizer.tallies.every((row) => row.available === 0 && row.unknown === 1)).toBe(true);
+    expect(organizer.tallies.every((row) => row.fullSupport === false)).toBe(true);
+  });
+
+  it("rejects a JSON submit that omits eventVersion", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Versioned submit",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const event = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    const missing = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Alex",
+        intervals: [{ ...event.candidates[0]!, state: "available" }],
+      }),
+    });
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ code: "validation" }) }),
+    );
+  });
+
+  it("edits title only and leaves eventVersion untouched", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Old title",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { organizerToken: string; eventVersion: number };
+    const updated = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventVersion: poll.eventVersion, title: "New title" }),
+    });
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toEqual(
+      expect.objectContaining({ eventVersion: 1, constraintsChanged: false }),
+    );
+    const organizer = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      title: string;
+      eventVersion: number;
+    };
+    expect(organizer.title).toBe("New title");
+    expect(organizer.eventVersion).toBe(1);
+  });
+
+  it("keeps a closed poll closed after an edit", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Closed edit",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { organizerToken: string; eventVersion: number };
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/close`, { method: "POST" })).status,
+    ).toBe(200);
+    const updated = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventVersion: poll.eventVersion, title: "Still closed" }),
+    });
+    expect(updated.status).toBe(200);
+    const organizer = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      status: string;
+      title: string;
+    };
+    expect(organizer.status).toBe("closed");
+    expect(organizer.title).toBe("Still closed");
+  });
+
+  it("reopens a cancelled poll and refuses a finalized poll", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Cancel then reopen",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { organizerToken: string };
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/cancel`, { method: "POST" })).status,
+    ).toBe(200);
+    const reopened = await hono.request(`/api/organizer/${poll.organizerToken}/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(reopened.status).toBe(200);
+    expect(
+      ((await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as { status: string }).status,
+    ).toBe("open");
+
+    const other = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Finalized",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const decided = (await other.json()) as {
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    };
+    const listed = await hono.request(`/api/polls/${decided.publicId}`);
+    const slot = ((await listed.json()) as { candidates: Array<{ start: string; end: string }> }).candidates[0]!;
+    expect(
+      (
+        await hono.request(`/api/organizer/${decided.organizerToken}/finalize`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            start: slot.start,
+            end: slot.end,
+            eventVersion: decided.eventVersion,
+            resultsVersion: 1,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const refused = await hono.request(`/api/organizer/${decided.organizerToken}/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: "closed",
+          message: "A finalized poll cannot be reopened. Delete it and create a new poll.",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a stale eventVersion on update and a duration that fits no window", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Stale edit",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as {
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const event = (await listed.json()) as { windows: Array<{ start: string; end: string }> };
+    expect(
+      (
+        await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            eventVersion: poll.eventVersion,
+            windows: [...event.windows, { start: "2026-09-22T13:00:00Z", end: "2026-09-22T16:00:00Z" }],
+          }),
+        })
+      ).status,
+    ).toBe(200);
+    const stale = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventVersion: poll.eventVersion, title: "Should not land" }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ code: "stale_version" }) }),
+    );
+    const tooLong = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventVersion: 2, durationMinutes: 240 }),
+    });
+    expect(tooLong.status).toBe(400);
+    expect(await tooLong.json()).toEqual(
+      expect.objectContaining({ error: expect.objectContaining({ code: "validation" }) }),
+    );
+    const organizer = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      title: string;
+      durationMinutes: number;
+      eventVersion: number;
+    };
+    expect(organizer.title).toBe("Stale edit");
+    expect(organizer.durationMinutes).toBe(60);
+    expect(organizer.eventVersion).toBe(2);
   });
 });
 
