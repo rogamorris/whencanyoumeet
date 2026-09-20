@@ -14,16 +14,19 @@ import { replayCreatePoll, requestHash } from "./http/idempotency.ts";
 import {
   CreatePage,
   displayTimeZone,
+  EditPage,
   ErrorPage,
   InvitationPage,
   OrganizerPage,
   parseSlotFields,
+  parseWindowFields,
   ParticipantPage,
 } from "./http/pages.tsx";
 import {
   createPollSchema,
   finalizeSchema,
   submitSchema,
+  updateEventSchema,
   updateSchema,
   withdrawSchema,
 } from "./http/schemas.ts";
@@ -195,6 +198,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       const result = await commands.submitAvailability({
         publicId: c.req.param("publicId"),
         name: formString(body.name),
+        eventVersion: Number(formString(body.eventVersion)),
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
       });
@@ -239,6 +243,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       await commands.updateAvailability({
         responseToken: c.req.param("token"),
         responseVersion: Number(formString(body.responseVersion)),
+        eventVersion: Number(formString(body.eventVersion)),
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
       });
@@ -297,6 +302,59 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       );
     }),
   );
+
+  app.get("/o/:token/edit", (c) =>
+    handle(c, async () => {
+      const event = await commands.getOrganizerEvent(c.req.param("token"));
+      const tz = displayTimeZone(c.req.query("tz"), event.timezone);
+      return c.html(
+        <EditPage event={event} organizerToken={c.req.param("token")} displayTimeZone={tz} />,
+      );
+    }),
+  );
+
+  app.post("/o/:token/update", (c) =>
+    handle(c, async () => {
+      const body = await readForm(c);
+      const timezone = formString(body.timezone);
+      const tz = displayTimeZone(formString(body.displayTimeZone) || undefined, timezone);
+      await commands.updateEvent({
+        organizerToken: c.req.param("token"),
+        eventVersion: Number(formString(body.eventVersion)),
+        title: formString(body.title) || undefined,
+        context: formString(body.context),
+        location: formString(body.location),
+        timezone: timezone || undefined,
+        durationMinutes: Number(formString(body.durationMinutes)),
+        windows: parseWindowFields(body, tz),
+      });
+      return c.redirect(`/o/${c.req.param("token")}`, 303);
+    }),
+  );
+
+  app.post("/api/organizer/:token/update", async (c) => {
+    try {
+      const parsed = updateEventSchema.parse(await c.req.json());
+      return c.json(await commands.updateEvent({ organizerToken: c.req.param("token"), ...parsed }));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
+
+  app.post("/o/:token/reopen", (c) =>
+    handle(c, async () => {
+      await commands.reopen(c.req.param("token"));
+      return c.redirect(`/o/${c.req.param("token")}`, 303);
+    }),
+  );
+
+  app.post("/api/organizer/:token/reopen", async (c) => {
+    try {
+      return c.json(await commands.reopen(c.req.param("token")));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
 
   app.post("/o/:token/finalize", (c) =>
     handle(c, async () => {

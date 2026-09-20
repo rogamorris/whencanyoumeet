@@ -1,7 +1,9 @@
 import { raw } from "hono/html";
 import type { FC, PropsWithChildren } from "hono/jsx";
-import { instantToDate, parseInstant, formatLocal, assertTimeZone } from "../domain/time.ts";
-import type { Candidate, OrganizerEvent, PublicEvent, ParticipantView } from "../domain/types.ts";
+import { Temporal } from "temporal-polyfill";
+import { remapPaintedAnswers } from "../domain/overlap.ts";
+import { instantToDate, iso, parseInstant, formatLocal, assertTimeZone, zonedLocal } from "../domain/time.ts";
+import type { Candidate, Interval, OrganizerEvent, PublicEvent, ParticipantView } from "../domain/types.ts";
 import { DomainError } from "../domain/errors.ts";
 import { webmcpScript } from "./webmcp.ts";
 
@@ -221,6 +223,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
             type: "object",
             properties: {
               name: { type: "string" },
+              eventVersion: { type: "integer" },
               remainderUnavailable: { type: "boolean" },
               intervals: {
                 type: "array",
@@ -235,7 +238,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
                 },
               },
             },
-            required: ["name"],
+            required: ["name", "eventVersion"],
           },
         },
       ])}
@@ -270,6 +273,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
       </form>
       {props.event.status === "open" ? (
         <form method="post" action={`/p/${props.event.publicId}/responses`} class="card">
+          <input type="hidden" name="eventVersion" value={String(props.event.eventVersion)} />
           <label>
             Your name
             <br />
@@ -321,13 +325,7 @@ export function ParticipantPage(props: {
   displayTimeZone: string;
 }) {
   const groups = groupCandidates(props.displayTimeZone, props.event.candidates);
-  const current = new Map(
-    props.event.intervals.flatMap((interval) =>
-      props.event.candidates
-        .filter((candidate) => candidate.start >= interval.start && candidate.end <= interval.end)
-        .map((candidate) => [`${candidate.start}|${candidate.end}`, interval.state] as [string, typeof interval.state]),
-    ),
-  );
+  const current = remapPaintedAnswers(props.event.intervals, props.event.candidates);
   const path = `/api/responses/${props.responseToken}`;
   return (
     <Layout
@@ -350,10 +348,11 @@ export function ParticipantPage(props: {
             type: "object",
             properties: {
               responseVersion: { type: "integer" },
+              eventVersion: { type: "integer" },
               remainderUnavailable: { type: "boolean" },
               intervals: { type: "array" },
             },
-            required: ["responseVersion"],
+            required: ["responseVersion", "eventVersion"],
           },
         },
         {
@@ -377,8 +376,15 @@ export function ParticipantPage(props: {
         Editing as {props.event.displayName}. Response version {props.event.responseVersion}.
       </p>
       {props.event.withdrawn ? <p class="warn">This response is withdrawn.</p> : null}
+      {props.event.staleness === "windows_changed" ? (
+        <p class="warn">The offered times changed since you answered.</p>
+      ) : null}
+      {props.event.staleness === "reevaluation_required" ? (
+        <p class="warn">The duration changed. Please re-confirm.</p>
+      ) : null}
       <form method="post" action={`/r/${props.responseToken}`} class="card">
         <input type="hidden" name="responseVersion" value={String(props.event.responseVersion)} />
+        <input type="hidden" name="eventVersion" value={String(props.event.eventVersion)} />
         {groups.map(([day, slots]) => (
           <section class="day">
             <h2>{day}</h2>
@@ -467,10 +473,44 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           },
         },
         {
+          name: "update_event",
+          description: "Edit poll metadata or replace the offered windows. Requires eventVersion.",
+          method: "POST",
+          path: `${path}/update`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              eventVersion: { type: "integer" },
+              title: { type: "string" },
+              context: { type: ["string", "null"] },
+              location: { type: ["string", "null"] },
+              timezone: { type: "string" },
+              durationMinutes: { type: "integer" },
+              windows: { type: "array" },
+              range: { type: "object" },
+            },
+            required: ["eventVersion"],
+          },
+        },
+        {
           name: "close_poll",
           description: "Close collection without choosing a time.",
           method: "POST",
           path: `${path}/close`,
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: "reopen_poll",
+          description: "Reopen collection so participants can answer again.",
+          method: "POST",
+          path: `${path}/reopen`,
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: "cancel_poll",
+          description: "Cancel this poll.",
+          method: "POST",
+          path: `${path}/cancel`,
           inputSchema: { type: "object", properties: {} },
         },
         {
@@ -517,7 +557,11 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           {props.event.participants.map((person) => (
             <li>
               {person.displayName}
-              {person.withdrawn ? " (withdrawn)" : ""} · updated {person.updatedAt}
+              {person.withdrawn ? " (withdrawn)" : ""}
+              {person.staleness === "windows_changed" ? " · windows changed" : ""}
+              {person.staleness === "reevaluation_required" ? " · reevaluation required" : ""}
+              {" · updated "}
+              {person.updatedAt}
             </li>
           ))}
         </ul>
@@ -566,6 +610,18 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           </tbody>
         </table>
       </div>
+      {props.event.status === "open" || props.event.status === "closed" ? (
+        <p>
+          <a class="btn" href={`/o/${props.organizerToken}/edit`}>
+            Edit poll
+          </a>
+        </p>
+      ) : null}
+      {props.event.status === "closed" || props.event.status === "cancelled" ? (
+        <form method="post" action={`/o/${props.organizerToken}/reopen`}>
+          <button type="submit">Reopen</button>
+        </form>
+      ) : null}
       {props.event.status === "open" ? (
         <form method="post" action={`/o/${props.organizerToken}/close`}>
           <button class="secondary" type="submit">
@@ -589,6 +645,97 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           Delete poll
         </button>
       </form>
+    </Layout>
+  );
+}
+
+export function EditPage(props: {
+  event: OrganizerEvent;
+  organizerToken: string;
+  displayTimeZone: string;
+}) {
+  return (
+    <Layout title={`Edit · ${props.event.title}`} noReferrer>
+      <h1>Edit poll</h1>
+      <p class="muted">
+        Event v{props.event.eventVersion}. Changing windows or duration moves the event version.
+        Title, context, location, and time zone do not.
+      </p>
+      <form method="get">
+        <label>
+          Display time zone <input name="tz" value={props.displayTimeZone} />
+        </label>
+        <button class="secondary" type="submit">
+          Update display
+        </button>
+      </form>
+      <form
+        method="post"
+        action={`/o/${props.organizerToken}/update`}
+        class="card"
+        onsubmit={`return this.durationMinutes.value === '${props.event.durationMinutes}' || confirm('Changing duration asks every respondent to re-confirm.')`}
+      >
+        <input type="hidden" name="eventVersion" value={String(props.event.eventVersion)} />
+        <input type="hidden" name="displayTimeZone" value={props.displayTimeZone} />
+        <label>
+          Title
+          <br />
+          <input name="title" required maxlength={200} style="width:100%" value={props.event.title} />
+        </label>
+        <label>
+          Context
+          <br />
+          <textarea name="context" rows={2} style="width:100%">{props.event.context ?? ""}</textarea>
+        </label>
+        <label>
+          Location
+          <br />
+          <input name="location" maxlength={500} style="width:100%" value={props.event.location ?? ""} />
+        </label>
+        <label>
+          Time zone
+          <br />
+          <input name="timezone" value={props.event.timezone} required />
+        </label>
+        <label>
+          Duration (minutes)
+          <br />
+          <input
+            name="durationMinutes"
+            type="number"
+            min={15}
+            max={240}
+            step={15}
+            value={props.event.durationMinutes}
+          />
+        </label>
+        <p class="muted">Changing duration asks every respondent to re-confirm.</p>
+        <fieldset>
+          <legend>Current windows</legend>
+          <p class="muted">Uncheck a window to drop it. Times are absolute instants.</p>
+          {props.event.windows.map((window) => (
+            <label>
+              <input type="checkbox" name={`window:${window.start}|${window.end}`} checked />{" "}
+              {formatLocal(props.displayTimeZone, window.start)} –{" "}
+              {formatLocal(props.displayTimeZone, window.end)}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset>
+          <legend>Add windows</legend>
+          <p class="muted">Blank rows are ignored. Enter local times in {props.displayTimeZone}.</p>
+          {Array.from({ length: 3 }, () => (
+            <p>
+              <input type="datetime-local" name="addStart[]" />{" "}
+              <input type="datetime-local" name="addEnd[]" />
+            </p>
+          ))}
+        </fieldset>
+        <button type="submit">Save changes</button>
+      </form>
+      <p>
+        <a href={`/o/${props.organizerToken}`}>Back to organizer</a>
+      </p>
     </Layout>
   );
 }
@@ -638,4 +785,61 @@ export function parseSlotFields(
     intervals.push({ start: packed.slice(0, bar), end: packed.slice(bar + 1), state: value });
   }
   return intervals;
+}
+
+export function parseWindowFields(
+  body: Record<string, string | File | (string | File)[]>,
+  displayTimeZone: string,
+): Interval[] {
+  const offered: Interval[] = [];
+  for (const [key, value] of Object.entries(body)) {
+    if (!key.startsWith("window:") || !isChecked(value)) continue;
+    const packed = key.slice("window:".length);
+    const bar = packed.indexOf("|");
+    offered.push({ start: packed.slice(0, bar), end: packed.slice(bar + 1) });
+  }
+  const starts = stringFields(body["addStart[]"] ?? body.addStart);
+  const ends = stringFields(body["addEnd[]"] ?? body.addEnd);
+  const count = Math.max(starts.length, ends.length);
+  for (let index = 0; index < count; index += 1) {
+    const startRaw = starts[index]?.trim() ?? "";
+    const endRaw = ends[index]?.trim() ?? "";
+    if (startRaw === "" && endRaw === "") continue;
+    if (startRaw === "" || endRaw === "") {
+      throw new DomainError("validation", "Added windows need both a start and an end.");
+    }
+    const startLocal = splitDateTimeLocal(startRaw);
+    const endLocal = splitDateTimeLocal(endRaw);
+    offered.push({
+      start: iso(zonedLocal(displayTimeZone, startLocal.date, startLocal.time).toInstant()),
+      end: iso(zonedLocal(displayTimeZone, endLocal.date, endLocal.time).toInstant()),
+    });
+  }
+  return offered;
+}
+
+function isChecked(value: string | File | (string | File)[]): boolean {
+  if (Array.isArray(value)) return value.some((item) => typeof item === "string" && item !== "");
+  return typeof value === "string" && value !== "";
+}
+
+function stringFields(value: string | File | (string | File)[] | undefined): string[] {
+  if (value === undefined) return [];
+  if (Array.isArray(value)) return value.map((item) => (typeof item === "string" ? item : ""));
+  return typeof value === "string" ? [value] : [];
+}
+
+function splitDateTimeLocal(value: string): { date: Temporal.PlainDate; time: Temporal.PlainTime } {
+  const [datePart, timePart] = value.split("T");
+  if (!datePart || !timePart) {
+    throw new DomainError("validation", "Added windows must use YYYY-MM-DDTHH:mm.");
+  }
+  try {
+    return {
+      date: Temporal.PlainDate.from(datePart),
+      time: Temporal.PlainTime.from(timePart),
+    };
+  } catch {
+    throw new DomainError("validation", "Added windows must use YYYY-MM-DDTHH:mm.");
+  }
 }

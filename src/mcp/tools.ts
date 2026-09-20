@@ -2,7 +2,13 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import type { Commands } from "../domain/commands.ts";
 import { errorPayload } from "../http/errors.ts";
-import { availabilityIntervalSchema, createPollSchema, finalizeSchema } from "../http/schemas.ts";
+import {
+  createPollSchema,
+  finalizeSchema,
+  submitSchema,
+  updateEventSchema,
+  updateSchema,
+} from "../http/schemas.ts";
 
 function toolResult(data: unknown) {
   return {
@@ -67,12 +73,7 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
       title: "Submit availability",
       description:
         "Create a new participant response. Omitted times stay unknown unless remainderUnavailable is true. Does not book a meeting.",
-      inputSchema: z.object({
-        publicId: z.string(),
-        name: z.string().min(1).max(80),
-        intervals: z.array(availabilityIntervalSchema).default([]),
-        remainderUnavailable: z.boolean().optional(),
-      }),
+      inputSchema: submitSchema.extend({ publicId: z.string() }),
     },
     async (input) => {
       try {
@@ -88,12 +89,7 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
     {
       title: "Update availability",
       description: "Revise an existing response. Requires the current responseVersion.",
-      inputSchema: z.object({
-        responseToken: z.string(),
-        responseVersion: z.number().int().min(1),
-        intervals: z.array(availabilityIntervalSchema).default([]),
-        remainderUnavailable: z.boolean().optional(),
-      }),
+      inputSchema: updateSchema.extend({ responseToken: z.string() }),
     },
     async (input) => {
       try {
@@ -134,6 +130,39 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
     async (input) => {
       try {
         return toolResult(await commands.finalize(input));
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_event",
+    {
+      title: "Update event",
+      description:
+        "Edit poll metadata or replace offered windows. eventVersion is required. Constraint changes bump eventVersion. Does not change status.",
+      inputSchema: updateEventSchema.extend({ organizerToken: z.string() }),
+    },
+    async (input) => {
+      try {
+        return toolResult(await commands.updateEvent(input));
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "reopen_poll",
+    {
+      title: "Reopen poll",
+      description: "Reopen collection from closed or cancelled. Idempotent when already open.",
+      inputSchema: z.object({ organizerToken: z.string() }),
+    },
+    async (input) => {
+      try {
+        return toolResult(await commands.reopen(input.organizerToken));
       } catch (error) {
         return toolError(error);
       }

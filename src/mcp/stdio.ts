@@ -36,6 +36,8 @@ const remoteCommands = {
   withdrawResponse: (token, version) =>
     api("POST", `/api/responses/${token}/withdraw`, { responseVersion: version }),
   finalize: (input) => api("POST", `/api/organizer/${input.organizerToken}/finalize`, input),
+  updateEvent: (input) => api("POST", `/api/organizer/${input.organizerToken}/update`, input),
+  reopen: (token) => api("POST", `/api/organizer/${token}/reopen`),
   cancel: (token) => api("POST", `/api/organizer/${token}/cancel`),
   close: (token) => api("POST", `/api/organizer/${token}/close`),
   deletePoll: (token) => api("POST", `/api/organizer/${token}/delete`),

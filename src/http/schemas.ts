@@ -36,12 +36,23 @@ export const submitSchema = z.object({
   name: z.string().min(1).max(80),
   intervals: z.array(availabilityIntervalSchema).default([]),
   remainderUnavailable: z.boolean().optional(),
-});
+}).extend({ eventVersion: z.number().int().min(1) });
 
 export const updateSchema = z.object({
   responseVersion: z.number().int().min(1),
   intervals: z.array(availabilityIntervalSchema).default([]),
   remainderUnavailable: z.boolean().optional(),
+}).extend({ eventVersion: z.number().int().min(1) });
+
+export const updateEventSchema = z.object({
+  eventVersion: z.number().int().min(1),
+  title: z.string().min(1).max(200).optional(),
+  context: z.string().max(2000).nullable().optional(),
+  location: z.string().max(500).nullable().optional(),
+  timezone: z.string().min(1).optional(),
+  durationMinutes: z.number().int().optional(),
+  windows: z.array(intervalSchema).optional(),
+  range: rangeSchema.optional(),
 });
 
 export const withdrawSchema = z.object({
