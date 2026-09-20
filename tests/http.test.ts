@@ -1054,6 +1054,178 @@ describe("http slice", () => {
     expect(organizer.durationMinutes).toBe(60);
     expect(organizer.eventVersion).toBe(2);
   });
+
+  it("replays submit with the same Idempotency-Key and does not mint a second participant", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Retry submit",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string; eventVersion: number };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const publicEvent = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    const slot = publicEvent.candidates[0]!;
+    const payload = {
+      name: "Sam",
+      eventVersion: poll.eventVersion,
+      remainderUnavailable: true,
+      intervals: [{ ...slot, state: "available" as const }],
+    };
+    const headers = { "content-type": "application/json", "Idempotency-Key": "submit-sam" };
+    const first = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { responseToken: string; responseVersion: number };
+    const replay = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        remainderUnavailable: true,
+        intervals: payload.intervals,
+        eventVersion: payload.eventVersion,
+        name: "Sam",
+      }),
+    });
+    expect(replay.status).toBe(201);
+    const replayBody = (await replay.json()) as { responseToken: string; responseVersion: number };
+    expect(replayBody.responseToken).toBe(firstBody.responseToken);
+    expect(replayBody.responseVersion).toBe(1);
+    const organizer = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      participants: unknown[];
+    };
+    expect(organizer.participants).toHaveLength(1);
+
+    const clash = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...payload, name: "Other Sam" }),
+    });
+    expect(clash.status).toBe(409);
+    const clashText = await clash.text();
+    expect(clashText).not.toContain(firstBody.responseToken);
+    const clashBody = JSON.parse(clashText) as { error?: { code: string }; responseToken?: string };
+    expect(clashBody.error?.code).toBe("conflict");
+    expect(clashBody.responseToken).toBeUndefined();
+    const afterClash = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      participants: unknown[];
+    };
+    expect(afterClash.participants).toHaveLength(1);
+
+    const other = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "submit-sam-2" },
+      body: JSON.stringify(payload),
+    });
+    expect(other.status).toBe(201);
+    const otherBody = (await other.json()) as { responseToken: string };
+    expect(otherBody.responseToken).not.toBe(firstBody.responseToken);
+    const two = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      participants: unknown[];
+    };
+    expect(two.participants).toHaveLength(2);
+  });
+
+  it("replays update and withdraw with the same Idempotency-Key", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Retry edit",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string; eventVersion: number };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const publicEvent = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    const slot = publicEvent.candidates[0]!;
+    const submitted = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Sam",
+        eventVersion: poll.eventVersion,
+        remainderUnavailable: true,
+        intervals: [{ ...slot, state: "available" }],
+      }),
+    });
+    const { responseToken } = (await submitted.json()) as { responseToken: string };
+    const updatePayload = {
+      responseVersion: 1,
+      eventVersion: poll.eventVersion,
+      remainderUnavailable: true,
+      intervals: [{ ...slot, state: "tentative" as const }],
+    };
+    const updateHeaders = { "content-type": "application/json", "Idempotency-Key": "update-sam" };
+    const firstUpdate = await hono.request(`/api/responses/${responseToken}`, {
+      method: "PATCH",
+      headers: updateHeaders,
+      body: JSON.stringify(updatePayload),
+    });
+    expect(firstUpdate.status).toBe(200);
+    const firstUpdateBody = (await firstUpdate.json()) as { responseVersion: number };
+    expect(firstUpdateBody.responseVersion).toBe(2);
+    const replayUpdate = await hono.request(`/api/responses/${responseToken}`, {
+      method: "PATCH",
+      headers: updateHeaders,
+      body: JSON.stringify(updatePayload),
+    });
+    expect(replayUpdate.status).toBe(200);
+    const replayUpdateBody = (await replayUpdate.json()) as { responseVersion: number };
+    expect(replayUpdateBody.responseVersion).toBe(2);
+    const viewed = (await (await hono.request(`/api/responses/${responseToken}`)).json()) as {
+      responseVersion: number;
+      intervals: Array<{ state: string }>;
+    };
+    expect(viewed.responseVersion).toBe(2);
+    expect(viewed.intervals).toEqual([expect.objectContaining({ state: "tentative" })]);
+
+    const clashUpdate = await hono.request(`/api/responses/${responseToken}`, {
+      method: "PATCH",
+      headers: updateHeaders,
+      body: JSON.stringify({ ...updatePayload, remainderUnavailable: false }),
+    });
+    expect(clashUpdate.status).toBe(409);
+    const clashUpdateText = await clashUpdate.text();
+    expect(clashUpdateText).not.toContain(responseToken);
+
+    const withdrawHeaders = { "content-type": "application/json", "Idempotency-Key": "withdraw-sam" };
+    const withdrawBody = JSON.stringify({ responseVersion: 2 });
+    const firstWithdraw = await hono.request(`/api/responses/${responseToken}/withdraw`, {
+      method: "POST",
+      headers: withdrawHeaders,
+      body: withdrawBody,
+    });
+    expect(firstWithdraw.status).toBe(200);
+    const replayWithdraw = await hono.request(`/api/responses/${responseToken}/withdraw`, {
+      method: "POST",
+      headers: withdrawHeaders,
+      body: withdrawBody,
+    });
+    expect(replayWithdraw.status).toBe(200);
+    const after = (await (await hono.request(`/api/responses/${responseToken}`)).json()) as {
+      withdrawn: boolean;
+      responseVersion: number;
+    };
+    expect(after.withdrawn).toBe(true);
+    expect(after.responseVersion).toBe(3);
+    const organizer = (await (await hono.request(`/api/organizer/${poll.organizerToken}`)).json()) as {
+      participants: Array<{ withdrawn: boolean }>;
+    };
+    expect(organizer.participants).toHaveLength(1);
+    expect(organizer.participants[0]?.withdrawn).toBe(true);
+  });
 });
 
 function mcpStructured<T>(sse: string): T {
