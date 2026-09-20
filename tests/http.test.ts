@@ -1226,6 +1226,80 @@ describe("http slice", () => {
     expect(organizer.participants).toHaveLength(1);
     expect(organizer.participants[0]?.withdrawn).toBe(true);
   });
+
+  it("replays MCP submit_availability with the same idempotencyKey", async () => {
+    const hono = await app();
+    const mcpHeaders = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    };
+    const createdRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "create_poll",
+          arguments: {
+            title: "MCP retry",
+            durationMinutes: 60,
+            timezone: "America/New_York",
+            range,
+          },
+        },
+      }),
+    });
+    const created = mcpStructured<{
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+    }>(await createdRpc.text());
+    const args = {
+      publicId: created.publicId,
+      name: "Alex",
+      eventVersion: created.eventVersion,
+      remainderUnavailable: true,
+      idempotencyKey: "mcp-submit-alex",
+      intervals: [
+        {
+          start: "2026-09-21T13:00:00Z",
+          end: "2026-09-21T14:00:00Z",
+          state: "available",
+        },
+      ],
+    };
+    const firstRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "submit_availability", arguments: args },
+      }),
+    });
+    expect(firstRpc.status).toBe(200);
+    const first = mcpStructured<{ responseToken: string }>(await firstRpc.text());
+    const replayRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "submit_availability", arguments: args },
+      }),
+    });
+    expect(replayRpc.status).toBe(200);
+    const replay = mcpStructured<{ responseToken: string }>(await replayRpc.text());
+    expect(replay.responseToken).toBe(first.responseToken);
+    const organizer = (await (await hono.request(`/api/organizer/${created.organizerToken}`)).json()) as {
+      participants: unknown[];
+    };
+    expect(organizer.participants).toHaveLength(1);
+  });
 });
 
 function mcpStructured<T>(sse: string): T {
