@@ -45,16 +45,51 @@ export function openApiDocument(serverUrl: string) {
         post: {
           summary: "Submit availability",
           operationId: "submitAvailability",
-          parameters: [{ name: "publicId", in: "path", required: true, schema: { type: "string" } }],
-          responses: { "201": { description: "Includes private response token once" } },
+          parameters: [
+            { name: "publicId", in: "path", required: true, schema: { type: "string" } },
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string" },
+              description:
+                "Replay the same submit. Same parsed body returns 201 and the original response token. A different parsed body returns 409 without the first token.",
+            },
+          ],
+          responses: {
+            "201": { description: "Includes private response token once" },
+            "409": { description: "Idempotency-Key reused with a different parsed body" },
+          },
         },
       },
       "/api/responses/{token}": {
         get: { summary: "Own response", operationId: "getResponse" },
-        patch: { summary: "Update availability", operationId: "updateAvailability" },
+        patch: {
+          summary: "Update availability",
+          operationId: "updateAvailability",
+          parameters: [
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string" },
+            },
+          ],
+        },
       },
       "/api/responses/{token}/withdraw": {
-        post: { summary: "Withdraw response", operationId: "withdrawResponse" },
+        post: {
+          summary: "Withdraw response",
+          operationId: "withdrawResponse",
+          parameters: [
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string" },
+            },
+          ],
+        },
       },
       "/api/organizer/{token}": {
         get: { summary: "Organizer results", operationId: "getOrganizerEvent" },

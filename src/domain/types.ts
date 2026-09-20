@@ -36,6 +36,7 @@ export type CreatePollInput = {
   timezone: string;
   windows?: Interval[];
   range?: RangeSpec;
+  idempotencyKey?: string;
 };
 
 export type CreatePollResult = {
@@ -169,6 +170,7 @@ export type SubmitAvailabilityInput = {
   eventVersion: number;
   intervals: AvailabilityInterval[];
   remainderUnavailable?: boolean;
+  idempotencyKey?: string;
 };
 
 export type SubmitAvailabilityResult = {
@@ -184,6 +186,22 @@ export type UpdateAvailabilityInput = {
   eventVersion: number;
   intervals: AvailabilityInterval[];
   remainderUnavailable?: boolean;
+  idempotencyKey?: string;
+};
+
+export type UpdateAvailabilityResult = {
+  responseVersion: number;
+  receipt: string;
+};
+
+export type WithdrawResponseInput = {
+  responseToken: string;
+  responseVersion: number;
+  idempotencyKey?: string;
+};
+
+export type WithdrawResponseResult = {
+  receipt: string;
 };
 
 export type FinalizeInput = {

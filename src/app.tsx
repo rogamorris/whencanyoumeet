@@ -8,9 +8,9 @@ import { migrate } from "./db/migrate.ts";
 import { createStore } from "./db/store.ts";
 import { createCommands } from "./domain/commands.ts";
 import { toIcs } from "./domain/ics.ts";
-import { DomainError, isDomainError } from "./domain/errors.ts";
+import { DomainError } from "./domain/errors.ts";
+import { randomToken } from "./domain/tokens.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
-import { replayCreatePoll, requestHash } from "./http/idempotency.ts";
 import {
   CreatePage,
   displayTimeZone,
@@ -148,26 +148,10 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/api/polls", async (c) => {
     try {
       const parsed = createPollSchema.parse(await c.req.json());
-      const idem = c.req.header("Idempotency-Key");
-      if (!idem) return c.json(await commands.createPoll(parsed), 201);
-      const key = `create:${idem}`;
-      const hash = requestHash(parsed);
-      const stored = await store.getIdempotency(key);
-      if (stored) {
-        const replayed = replayCreatePoll(stored, hash);
-        try {
-          await commands.getOrganizerEvent(replayed.organizerToken);
-          return c.json(replayed, 201);
-        } catch (error) {
-          if (!isDomainError(error) || error.code !== "not_found") throw error;
-        }
-      }
-      const created = await commands.createPoll(parsed);
-      const record = JSON.stringify({ requestHash: hash, result: created });
-      const persisted = stored
-        ? await store.replaceIdempotency(key, record)
-        : await store.saveIdempotency(key, record);
-      return c.json(replayCreatePoll(persisted, hash), 201);
+      return c.json(
+        await commands.createPoll({ ...parsed, idempotencyKey: c.req.header("Idempotency-Key") }),
+        201,
+      );
     } catch (error) {
       return jsonError(c, error);
     }
@@ -188,7 +172,9 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       }
       const event = await commands.getPublicEvent(c.req.param("publicId"));
       const tz = displayTimeZone(c.req.query("tz"), event.timezone);
-      return c.html(<InvitationPage event={event} displayTimeZone={tz} />);
+      return c.html(
+        <InvitationPage event={event} displayTimeZone={tz} formKey={randomToken()} />,
+      );
     }),
   );
 
@@ -201,6 +187,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         eventVersion: Number(formString(body.eventVersion)),
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
+        idempotencyKey: formString(body.idempotencyKey) || undefined,
       });
       return c.redirect(result.responseUrl, 303);
     }),
@@ -212,6 +199,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       const result = await commands.submitAvailability({
         publicId: c.req.param("publicId"),
         ...parsed,
+        idempotencyKey: c.req.header("Idempotency-Key"),
       });
       return c.json(result, 201);
     } catch (error) {
@@ -232,7 +220,13 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       const event = await commands.getParticipantEvent(c.req.param("token"));
       const tz = displayTimeZone(c.req.query("tz"), event.timezone);
       return c.html(
-        <ParticipantPage event={event} responseToken={c.req.param("token")} displayTimeZone={tz} />,
+        <ParticipantPage
+          event={event}
+          responseToken={c.req.param("token")}
+          displayTimeZone={tz}
+          updateKey={randomToken()}
+          withdrawKey={randomToken()}
+        />,
       );
     }),
   );
@@ -246,6 +240,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         eventVersion: Number(formString(body.eventVersion)),
         remainderUnavailable: formString(body.remainderUnavailable) === "true",
         intervals: parseSlotFields(body),
+        idempotencyKey: formString(body.idempotencyKey) || undefined,
       });
       return c.redirect(`/r/${c.req.param("token")}`, 303);
     }),
@@ -258,6 +253,7 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         await commands.updateAvailability({
           responseToken: c.req.param("token"),
           ...parsed,
+          idempotencyKey: c.req.header("Idempotency-Key"),
         }),
       );
     } catch (error) {
@@ -268,10 +264,11 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/r/:token/withdraw", (c) =>
     handle(c, async () => {
       const body = await readForm(c);
-      await commands.withdrawResponse(
-        c.req.param("token"),
-        Number(formString(body.responseVersion)),
-      );
+      await commands.withdrawResponse({
+        responseToken: c.req.param("token"),
+        responseVersion: Number(formString(body.responseVersion)),
+        idempotencyKey: formString(body.idempotencyKey) || undefined,
+      });
       return c.redirect(`/r/${c.req.param("token")}`, 303);
     }),
   );
@@ -279,7 +276,13 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/api/responses/:token/withdraw", async (c) => {
     try {
       const parsed = withdrawSchema.parse(await c.req.json());
-      return c.json(await commands.withdrawResponse(c.req.param("token"), parsed.responseVersion));
+      return c.json(
+        await commands.withdrawResponse({
+          responseToken: c.req.param("token"),
+          responseVersion: parsed.responseVersion,
+          idempotencyKey: c.req.header("Idempotency-Key"),
+        }),
+      );
     } catch (error) {
       return jsonError(c, error);
     }

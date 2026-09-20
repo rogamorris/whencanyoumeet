@@ -32,7 +32,7 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
       title: "Create poll",
       description:
         "Create a group scheduling poll from a title, duration, IANA time zone, and either concrete windows or a weekday date range. Returns a public invitation URL and a private organizer token. Does not read calendars.",
-      inputSchema: createPollSchema,
+      inputSchema: createPollSchema.extend({ idempotencyKey: z.string().min(1).optional() }),
     },
     async (input) => {
       try {
@@ -73,7 +73,7 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
       title: "Submit availability",
       description:
         "Create a new participant response. Omitted times stay unknown unless remainderUnavailable is true. Does not book a meeting.",
-      inputSchema: submitSchema.extend({ publicId: z.string() }),
+      inputSchema: submitSchema.extend({ publicId: z.string(), idempotencyKey: z.string().min(1).optional() }),
     },
     async (input) => {
       try {
@@ -89,7 +89,10 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
     {
       title: "Update availability",
       description: "Revise an existing response. Requires the current responseVersion.",
-      inputSchema: updateSchema.extend({ responseToken: z.string() }),
+      inputSchema: updateSchema.extend({
+        responseToken: z.string(),
+        idempotencyKey: z.string().min(1).optional(),
+      }),
     },
     async (input) => {
       try {
@@ -108,11 +111,12 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
       inputSchema: z.object({
         responseToken: z.string(),
         responseVersion: z.number().int().min(1),
+        idempotencyKey: z.string().min(1).optional(),
       }),
     },
     async (input) => {
       try {
-        return toolResult(await commands.withdrawResponse(input.responseToken, input.responseVersion));
+        return toolResult(await commands.withdrawResponse(input));
       } catch (error) {
         return toolError(error);
       }

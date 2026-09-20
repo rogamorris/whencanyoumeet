@@ -200,7 +200,11 @@ function weekdayBoxes() {
   ));
 }
 
-export function InvitationPage(props: { event: PublicEvent; displayTimeZone: string }) {
+export function InvitationPage(props: {
+  event: PublicEvent;
+  displayTimeZone: string;
+  formKey: string;
+}) {
   const groups = groupCandidates(props.displayTimeZone, props.event.candidates);
   return (
     <Layout
@@ -225,6 +229,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
               name: { type: "string" },
               eventVersion: { type: "integer" },
               remainderUnavailable: { type: "boolean" },
+              idempotencyKey: { type: "string" },
               intervals: {
                 type: "array",
                 items: {
@@ -274,6 +279,7 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
       {props.event.status === "open" ? (
         <form method="post" action={`/p/${props.event.publicId}/responses`} class="card">
           <input type="hidden" name="eventVersion" value={String(props.event.eventVersion)} />
+          <input type="hidden" name="idempotencyKey" value={props.formKey} />
           <label>
             Your name
             <br />
@@ -323,6 +329,8 @@ export function ParticipantPage(props: {
   event: ParticipantView;
   responseToken: string;
   displayTimeZone: string;
+  updateKey: string;
+  withdrawKey: string;
 }) {
   const groups = groupCandidates(props.displayTimeZone, props.event.candidates);
   const current = remapPaintedAnswers(props.event.intervals, props.event.candidates);
@@ -350,6 +358,7 @@ export function ParticipantPage(props: {
               responseVersion: { type: "integer" },
               eventVersion: { type: "integer" },
               remainderUnavailable: { type: "boolean" },
+              idempotencyKey: { type: "string" },
               intervals: { type: "array" },
             },
             required: ["responseVersion", "eventVersion"],
@@ -362,7 +371,7 @@ export function ParticipantPage(props: {
           path: `${path}/withdraw`,
           inputSchema: {
             type: "object",
-            properties: { responseVersion: { type: "integer" } },
+            properties: { responseVersion: { type: "integer" }, idempotencyKey: { type: "string" } },
             required: ["responseVersion"],
           },
         },
@@ -385,6 +394,7 @@ export function ParticipantPage(props: {
       <form method="post" action={`/r/${props.responseToken}`} class="card">
         <input type="hidden" name="responseVersion" value={String(props.event.responseVersion)} />
         <input type="hidden" name="eventVersion" value={String(props.event.eventVersion)} />
+        <input type="hidden" name="idempotencyKey" value={props.updateKey} />
         {groups.map(([day, slots]) => (
           <section class="day">
             <h2>{day}</h2>
@@ -434,6 +444,7 @@ export function ParticipantPage(props: {
       </form>
       <form method="post" action={`/r/${props.responseToken}/withdraw`}>
         <input type="hidden" name="responseVersion" value={String(props.event.responseVersion)} />
+        <input type="hidden" name="idempotencyKey" value={props.withdrawKey} />
         <button class="secondary" type="submit">
           Withdraw response
         </button>
