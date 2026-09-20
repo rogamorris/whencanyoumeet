@@ -1,7 +1,7 @@
 import { MAX_PARTICIPANTS, MAX_TITLE, PUBLIC_BASE_URL, STEP_MINUTES } from "../config.ts";
-import type { Store } from "../db/store.ts";
+import type { PollRecord, Store } from "../db/store.ts";
 import { DomainError } from "./errors.ts";
-import { resultsLanguage, sortTallies, tallyCandidates, validatePaintedIntervals } from "./overlap.ts";
+import { resultsLanguage, sortTallies, staleness, tallyCandidates, validatePaintedIntervals } from "./overlap.ts";
 import { hashToken, newId, publicId, randomToken } from "./tokens.ts";
 import { assertTimeZone, parseInterval } from "./time.ts";
 import type {
@@ -10,15 +10,59 @@ import type {
   FinalizeInput,
   OrganizerEvent,
   ParticipantView,
+  PollMetadata,
+  PollStatus,
   PublicEvent,
   SubmitAvailabilityInput,
   SubmitAvailabilityResult,
   UpdateAvailabilityInput,
+  UpdateEventInput,
+  UpdateEventResult,
 } from "./types.ts";
-import { assertDuration, candidatesInWindows, expandRange } from "./windows.ts";
+import { LIVE_STATUSES, REOPENABLE_STATUSES } from "./types.ts";
+import { candidatesInWindows, constraintsEqual, parseConstraints } from "./windows.ts";
 
 const DISCLOSURE =
   "Availability is information about a person. Unselected times stay unknown unless you explicitly mark remaining times as unavailable. This is not a calendar hold.";
+const STALE_EVENT = "The poll's offered times changed. Reload and answer the current version.";
+const REOPEN_RECEIPT = "Collection reopened. Participants can answer again.";
+const CLOSE_RECEIPT = "Collection closed without choosing a time.";
+const CONSTRAINTS_RECEIPT =
+  "Updated the offered times. Participants who answered the previous version keep their answers where those times still exist.";
+const METADATA_RECEIPT = "Updated the poll.";
+
+export function parseTitle(raw: string): string {
+  const title = raw.trim();
+  if (!title || title.length > MAX_TITLE) {
+    throw new DomainError("validation", `Title is required and must be at most ${MAX_TITLE} characters.`);
+  }
+  return title;
+}
+
+export function mergeMetadata(
+  patch: Pick<UpdateEventInput, "title" | "context" | "location" | "timezone">,
+  poll: PollRecord,
+): PollMetadata {
+  return {
+    title: patch.title !== undefined ? parseTitle(patch.title) : poll.title,
+    context: patch.context === undefined ? poll.context : optionalText(patch.context),
+    location: patch.location === undefined ? poll.location : optionalText(patch.location),
+    timezone: patch.timezone !== undefined ? assertTimeZone(patch.timezone) : poll.timezone,
+  };
+}
+
+function optionalText(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function parsePollStatus(value: string): PollStatus {
+  if (value === "open" || value === "closed" || value === "finalized" || value === "cancelled") {
+    return value;
+  }
+  throw new DomainError("conflict", "Stored poll status is unreadable.");
+}
 
 export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
   function urls(publicPollId: string, organizerToken?: string, responseToken?: string) {
@@ -29,16 +73,19 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
     };
   }
 
-  async function loadWindowsAndCandidates(poll: { id: string; durationMinutes: number }) {
+  async function currentConstraints(poll: PollRecord) {
     const windowRows = await store.listWindows(poll.id);
-    const candidates = candidatesInWindows(windowRows, poll.durationMinutes);
-    return { windows: windowRows, candidates };
+    return {
+      eventVersion: poll.eventVersion,
+      durationMinutes: poll.durationMinutes,
+      windows: windowRows,
+    };
   }
 
-  async function publicEvent(poll: NonNullable<Awaited<ReturnType<Store["getPollById"]>>>): Promise<PublicEvent> {
-    const { windows, candidates } = await loadWindowsAndCandidates(poll);
-    const people = await store.listParticipants(poll.id);
-    const active = people.filter((person) => !person.withdrawn);
+  async function publicEvent(poll: PollRecord): Promise<PublicEvent> {
+    const current = await currentConstraints(poll);
+    const candidates = candidatesInWindows(current.windows, current.durationMinutes);
+    const respondentCount = await store.countActive(poll.id);
     return {
       publicId: poll.publicId,
       title: poll.title,
@@ -47,11 +94,11 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       durationMinutes: poll.durationMinutes,
       stepMinutes: STEP_MINUTES,
       timezone: poll.timezone,
-      status: poll.status as PublicEvent["status"],
+      status: parsePollStatus(poll.status),
       eventVersion: poll.eventVersion,
-      windows,
+      windows: current.windows,
       candidates,
-      respondentCount: active.length,
+      respondentCount,
       finalized:
         poll.finalizedStart && poll.finalizedEnd
           ? { start: poll.finalizedStart, end: poll.finalizedEnd }
@@ -62,31 +109,27 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
 
   return {
     async createPoll(input: CreatePollInput): Promise<CreatePollResult> {
-      const title = input.title.trim();
-      if (!title || title.length > MAX_TITLE) {
-        throw new DomainError("validation", `Title is required and must be at most ${MAX_TITLE} characters.`);
-      }
-      assertDuration(input.durationMinutes);
+      const title = parseTitle(input.title);
       const timezone = assertTimeZone(input.timezone);
-      const windows = input.windows?.length
-        ? input.windows
-        : input.range
-          ? expandRange(timezone, input.range)
-          : [];
-      candidatesInWindows(windows, input.durationMinutes);
-
+      const constraints = parseConstraints({
+        durationMinutes: input.durationMinutes,
+        timezone,
+        windows: input.windows,
+        range: input.range,
+      });
       const organizerToken = randomToken();
       const pollPublicId = publicId();
       await store.insertPoll({
         id: newId("poll"),
         publicId: pollPublicId,
         organizerTokenHash: hashToken(organizerToken),
-        title,
-        context: input.context?.trim() || null,
-        location: input.location?.trim() || null,
-        durationMinutes: input.durationMinutes,
-        timezone,
-        windows,
+        metadata: {
+          title,
+          context: input.context?.trim() ? input.context.trim() : null,
+          location: input.location?.trim() ? input.location.trim() : null,
+          timezone,
+        },
+        constraints,
       });
       const { publicUrl, organizerUrl } = urls(pollPublicId, organizerToken);
       return {
@@ -111,15 +154,17 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       const poll = await store.getPollById(participant.pollId);
       if (!poll) throw new DomainError("not_found", "Poll not found.");
       const event = await publicEvent(poll);
-      const painted = await store.listIntervals(participant.id);
+      const current = await currentConstraints(poll);
       return {
         ...event,
         responseId: participant.id,
         displayName: participant.displayName,
-        coverageMode: participant.coverageMode as ParticipantView["coverageMode"],
+        coverageMode: participant.answer.coverageMode,
         withdrawn: participant.withdrawn,
         responseVersion: participant.responseVersion,
-        intervals: painted,
+        intervals: participant.answer.intervals,
+        evaluated: participant.answer.evaluated,
+        staleness: staleness(participant.answer, current),
       };
     },
 
@@ -127,25 +172,30 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       const poll = await store.getPollByOrganizerHash(hashToken(organizerToken));
       if (!poll) throw new DomainError("not_found", "Organizer link not found.");
       const event = await publicEvent(poll);
+      const current = await currentConstraints(poll);
       const people = await store.listParticipants(poll.id);
-      const withIntervals = await Promise.all(
-        people.map(async (person) => ({
-          responseId: person.id,
-          displayName: person.displayName,
-          withdrawn: person.withdrawn,
-          coverageMode: person.coverageMode as OrganizerEvent["participants"][number]["coverageMode"],
-          updatedAt: person.updatedAt,
-          intervals: await store.listIntervals(person.id),
-        })),
-      );
-      const tallies = sortTallies(tallyCandidates(event.candidates, withIntervals));
+      const listed = people.map((person) => ({
+        responseId: person.id,
+        displayName: person.displayName,
+        withdrawn: person.withdrawn,
+        coverageMode: person.answer.coverageMode,
+        updatedAt: person.updatedAt,
+        intervals: person.answer.intervals,
+        evaluatedEventVersion: person.answer.evaluated.eventVersion,
+        staleness: staleness(person.answer, current),
+      }));
+      const tallies = sortTallies(tallyCandidates(event.candidates, people, current));
+      const active = people.filter((person) => !person.withdrawn);
+      const reevaluationRequired = active.filter(
+        (person) => staleness(person.answer, current) === "reevaluation_required",
+      ).length;
       return {
         ...event,
         eventVersion: poll.eventVersion,
         resultsVersion: poll.resultsVersion,
-        participants: withIntervals,
+        participants: listed,
         tallies,
-        language: resultsLanguage(event.respondentCount),
+        language: resultsLanguage(active.length, reevaluationRequired),
       };
     },
 
@@ -157,21 +207,25 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       }
       const name = input.name.trim();
       if (!name) throw new DomainError("validation", "A display name is required.");
-      const existing = await store.listParticipants(poll.id);
-      if (existing.filter((row) => !row.withdrawn).length >= MAX_PARTICIPANTS) {
+      if ((await store.countActive(poll.id)) >= MAX_PARTICIPANTS) {
         throw new DomainError("limit", `This poll is limited to ${MAX_PARTICIPANTS} participants.`);
       }
-      const windowRows = await store.listWindows(poll.id);
-      const intervals = validatePaintedIntervals(input.intervals, windowRows);
+      if (input.eventVersion !== poll.eventVersion) {
+        throw new DomainError("stale_version", STALE_EVENT);
+      }
+      const current = await currentConstraints(poll);
+      const intervals = validatePaintedIntervals(input.intervals, current.windows);
       const responseToken = randomToken();
       await store.insertParticipant({
         pollId: poll.id,
         displayName: name,
         responseTokenHash: hashToken(responseToken),
-        coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
-        intervals,
+        answer: {
+          evaluated: current,
+          coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
+          intervals,
+        },
       });
-      await store.bumpResultsVersion(poll.id);
       const { responseUrl } = urls(poll.publicId, undefined, responseToken);
       return {
         responseToken,
@@ -189,14 +243,19 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       if (poll.status !== "open") {
         throw new DomainError("closed", "This poll is not accepting response edits.");
       }
-      const windowRows = await store.listWindows(poll.id);
-      const painted = validatePaintedIntervals(input.intervals, windowRows);
+      if (input.eventVersion !== poll.eventVersion) {
+        throw new DomainError("stale_version", STALE_EVENT);
+      }
+      const current = await currentConstraints(poll);
+      const painted = validatePaintedIntervals(input.intervals, current.windows);
       await store.updateParticipant(participant.id, input.responseVersion, {
-        coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
         withdrawn: false,
-        intervals: painted,
+        answer: {
+          evaluated: current,
+          coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
+          intervals: painted,
+        },
       });
-      await store.bumpResultsVersion(poll.id);
       return {
         responseVersion: input.responseVersion + 1,
         receipt: "Updated availability. This did not reserve calendar time.",
@@ -211,12 +270,7 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
       if (poll.status !== "open") {
         throw new DomainError("closed", "This poll is not accepting withdrawals.");
       }
-      await store.updateParticipant(participant.id, responseVersion, {
-        coverageMode: participant.coverageMode as "partial" | "remainder_unavailable",
-        withdrawn: true,
-        intervals: await store.listIntervals(participant.id),
-      });
-      await store.bumpResultsVersion(poll.id);
+      await store.updateParticipant(participant.id, responseVersion, { withdrawn: true });
       return { receipt: "Response withdrawn." };
     },
 
@@ -230,7 +284,8 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
         throw new DomainError("closed", "A cancelled poll cannot be finalized.");
       }
       const { start, end } = parseInterval({ start: input.start, end: input.end });
-      const { candidates } = await loadWindowsAndCandidates(poll);
+      const current = await currentConstraints(poll);
+      const candidates = candidatesInWindows(current.windows, current.durationMinutes);
       const match = candidates.some(
         (candidate) => candidate.start === input.start && candidate.end === input.end,
       );
@@ -248,33 +303,109 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
         note: input.note?.trim() || null,
       });
       return {
-        receipt:
-          "Recorded a decision. This page does not claim that a meeting invitation was sent.",
+        receipt: "Recorded a decision. This page does not claim that a meeting invitation was sent.",
         icsUrl: `${publicBaseUrl}/o/${input.organizerToken}/event.ics`,
       };
+    },
+
+    async updateEvent(input: UpdateEventInput): Promise<UpdateEventResult> {
+      const poll = await store.getPollByOrganizerHash(hashToken(input.organizerToken));
+      if (!poll) throw new DomainError("not_found", "Organizer link not found.");
+      const status = parsePollStatus(poll.status);
+      if (status !== "open" && status !== "closed") {
+        throw new DomainError(
+          "closed",
+          status === "finalized" ? "A finalized poll cannot be edited." : "Reopen the poll before editing it.",
+        );
+      }
+      const metadata = mergeMetadata(input, poll);
+      const currentWindows = await store.listWindows(poll.id);
+      const merged = parseConstraints({
+        durationMinutes: input.durationMinutes ?? poll.durationMinutes,
+        timezone: metadata.timezone,
+        windows: input.windows ?? (input.range ? undefined : currentWindows),
+        range: input.range,
+      });
+      const stored = parseConstraints({
+        durationMinutes: poll.durationMinutes,
+        timezone: poll.timezone,
+        windows: currentWindows,
+      });
+      const changed = !constraintsEqual(merged, stored);
+      const row = await store.updatePollIfFresh({
+        pollId: poll.id,
+        expectedEventVersion: input.eventVersion,
+        metadata,
+        constraints: changed ? merged : undefined,
+      });
+      return {
+        eventVersion: row.eventVersion,
+        constraintsChanged: changed,
+        receipt: changed ? CONSTRAINTS_RECEIPT : METADATA_RECEIPT,
+      };
+    },
+
+    async reopen(organizerToken: string): Promise<{ receipt: string }> {
+      const poll = await store.getPollByOrganizerHash(hashToken(organizerToken));
+      if (!poll) throw new DomainError("not_found", "Organizer link not found.");
+      const status = parsePollStatus(poll.status);
+      if (status === "open") return { receipt: REOPEN_RECEIPT };
+      if (status === "finalized") {
+        throw new DomainError(
+          "closed",
+          "A finalized poll cannot be reopened. Delete it and create a new poll.",
+        );
+      }
+      const row = await store.setStatusIf(poll.id, REOPENABLE_STATUSES, "open");
+      if (!row) {
+        throw new DomainError("conflict", "The poll changed while reopening. Reload.");
+      }
+      return { receipt: REOPEN_RECEIPT };
     },
 
     async cancel(organizerToken: string): Promise<{ receipt: string }> {
       const poll = await store.getPollByOrganizerHash(hashToken(organizerToken));
       if (!poll) throw new DomainError("not_found", "Organizer link not found.");
-      if (poll.status === "finalized") {
+      const status = parsePollStatus(poll.status);
+      if (status === "finalized") {
         throw new DomainError("closed", "A finalized poll cannot be cancelled. Delete it instead.");
       }
-      await store.setStatus(poll.id, "cancelled");
+      if (status === "cancelled") {
+        return { receipt: "Poll cancelled." };
+      }
+      const row = await store.setStatusIf(poll.id, LIVE_STATUSES, "cancelled");
+      if (!row) {
+        const latest = await store.getPollById(poll.id);
+        if (latest && parsePollStatus(latest.status) === "cancelled") {
+          return { receipt: "Poll cancelled." };
+        }
+        if (latest && parsePollStatus(latest.status) === "finalized") {
+          throw new DomainError("closed", "A finalized poll cannot be cancelled. Delete it instead.");
+        }
+        throw new DomainError("conflict", "The poll changed while cancelling. Reload.");
+      }
       return { receipt: "Poll cancelled." };
     },
 
     async close(organizerToken: string): Promise<{ receipt: string }> {
       const poll = await store.getPollByOrganizerHash(hashToken(organizerToken));
       if (!poll) throw new DomainError("not_found", "Organizer link not found.");
-      if (poll.status === "closed") {
-        return { receipt: "Collection closed without choosing a time." };
+      const status = parsePollStatus(poll.status);
+      if (status === "closed") {
+        return { receipt: CLOSE_RECEIPT };
       }
-      if (poll.status !== "open") {
+      if (status !== "open") {
         throw new DomainError("closed", "Only an open poll can be closed without a decision.");
       }
-      await store.setStatus(poll.id, "closed");
-      return { receipt: "Collection closed without choosing a time." };
+      const row = await store.setStatusIf(poll.id, ["open"], "closed");
+      if (!row) {
+        const latest = await store.getPollById(poll.id);
+        if (latest && parsePollStatus(latest.status) === "closed") {
+          return { receipt: CLOSE_RECEIPT };
+        }
+        throw new DomainError("closed", "Only an open poll can be closed without a decision.");
+      }
+      return { receipt: CLOSE_RECEIPT };
     },
 
     async deletePoll(organizerToken: string): Promise<{ receipt: string }> {
