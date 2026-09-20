@@ -230,8 +230,13 @@ export function createStore(db: Db) {
       return row?.body;
     },
 
-    async saveIdempotency(key: string, body: string): Promise<void> {
+    async saveIdempotency(key: string, body: string): Promise<string> {
       await db.insert(idempotencyKeys).values({ key, body, createdAt: nowIso() }).onConflictDoNothing();
+      const stored = await this.getIdempotency(key);
+      if (!stored) {
+        throw new DomainError("conflict", "Could not persist idempotency record.");
+      }
+      return stored;
     },
   };
 }

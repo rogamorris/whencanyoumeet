@@ -1,30 +1,59 @@
 import { createHash } from "node:crypto";
+import { DomainError } from "../domain/errors.ts";
+import type { CreatePollResult } from "../domain/types.ts";
 
-export type IdempotencyRecord<T> = {
+export type IdempotencyRecord = {
   requestHash: string;
-  result: T;
+  result: CreatePollResult;
 };
 
 export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  return JSON.stringify(canonicalize(value));
 }
 
 export function requestHash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
-export function parseIdempotencyRecord<T>(stored: string): IdempotencyRecord<T> | undefined {
-  const parsed = JSON.parse(stored) as { requestHash?: unknown; result?: unknown };
-  if (typeof parsed.requestHash === "string" && "result" in parsed) {
-    return { requestHash: parsed.requestHash, result: parsed.result as T };
+export function parseIdempotencyRecord(stored: string): IdempotencyRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch {
+    throw new DomainError("conflict", "Idempotency-Key already used with a different request.");
   }
-  return undefined;
+  if (!isRecord(parsed)) {
+    throw new DomainError("conflict", "Idempotency-Key already used with a different request.");
+  }
+  return parsed;
+}
+
+export function replayCreatePoll(stored: string, hash: string): CreatePollResult {
+  const record = parseIdempotencyRecord(stored);
+  if (record.requestHash !== hash) {
+    throw new DomainError("conflict", "Idempotency-Key already used with a different request.");
+  }
+  return record.result;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(object)
+        .sort()
+        .map((key) => [key, canonicalize(object[key])]),
+    );
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is IdempotencyRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.requestHash !== "string" || record.requestHash.length === 0) return false;
+  if (!record.result || typeof record.result !== "object") return false;
+  const result = record.result as Record<string, unknown>;
+  return typeof result.organizerToken === "string" && typeof result.publicId === "string";
 }

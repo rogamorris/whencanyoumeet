@@ -11,8 +11,7 @@ import { createCommands } from "./domain/commands.ts";
 import { toIcs } from "./domain/ics.ts";
 import { DomainError } from "./domain/errors.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
-import type { CreatePollResult } from "./domain/types.ts";
-import { parseIdempotencyRecord, requestHash } from "./http/idempotency.ts";
+import { replayCreatePoll, requestHash } from "./http/idempotency.ts";
 import {
   CreatePage,
   displayTimeZone,
@@ -148,25 +147,15 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
     try {
       const parsed = createPollSchema.parse(await c.req.json());
       const idem = c.req.header("Idempotency-Key");
-      if (idem) {
-        const key = `create:${idem}`;
-        const hash = requestHash(parsed);
-        const existing = await store.getIdempotency(key);
-        if (existing) {
-          const record = parseIdempotencyRecord<CreatePollResult>(existing);
-          if (record && record.requestHash === hash) {
-            return c.json(record.result, 201);
-          }
-          throw new DomainError(
-            "conflict",
-            "Idempotency-Key already used with a different request.",
-          );
-        }
+      if (!idem) return c.json(await commands.createPoll(parsed), 201);
+      const key = `create:${idem}`;
+      const hash = requestHash(parsed);
+      let stored = await store.getIdempotency(key);
+      if (!stored) {
         const created = await commands.createPoll(parsed);
-        await store.saveIdempotency(key, JSON.stringify({ requestHash: hash, result: created }));
-        return c.json(created, 201);
+        stored = await store.saveIdempotency(key, JSON.stringify({ requestHash: hash, result: created }));
       }
-      return c.json(await commands.createPoll(parsed), 201);
+      return c.json(replayCreatePoll(stored, hash), 201);
     } catch (error) {
       if (error instanceof z.ZodError) {
         return c.json({ error: { code: "validation", message: error.message } }, 400);
