@@ -3,6 +3,9 @@ export type AvailabilityState = "available" | "tentative" | "unavailable";
 export type FourState = AvailabilityState | "unknown";
 export type CoverageMode = "partial" | "remainder_unavailable";
 
+export const LIVE_STATUSES = ["open", "closed"] as const satisfies readonly PollStatus[];
+export const REOPENABLE_STATUSES = ["closed", "cancelled"] as const satisfies readonly PollStatus[];
+
 export type InstantIso = string;
 
 export type Interval = {
@@ -44,6 +47,67 @@ export type CreatePollResult = {
   resultsVersion: number;
 };
 
+export type Constraints = {
+  durationMinutes: number;
+  windows: Interval[];
+};
+
+declare const VALID: unique symbol;
+
+export type ValidConstraints = Constraints & { readonly [VALID]: true };
+
+export type EventConstraints = Constraints & { eventVersion: number };
+
+export type Answer = {
+  evaluated: EventConstraints;
+  coverageMode: CoverageMode;
+  intervals: AvailabilityInterval[];
+};
+
+export type Participant = {
+  id: string;
+  pollId: string;
+  displayName: string;
+  withdrawn: boolean;
+  responseVersion: number;
+  updatedAt: InstantIso;
+  answer: Answer;
+};
+
+export type Staleness = "current" | "windows_changed" | "reevaluation_required";
+
+export type ConstraintProposal = {
+  durationMinutes: number;
+  timezone: string;
+  windows?: Interval[];
+  range?: RangeSpec;
+};
+
+export type PollMetadata = {
+  title: string;
+  context: string | null;
+  location: string | null;
+  timezone: string;
+};
+
+export type UpdateEventInput = {
+  organizerToken: string;
+  eventVersion: number;
+  title?: string;
+  context?: string | null;
+  location?: string | null;
+  timezone?: string;
+  durationMinutes?: number;
+  windows?: Interval[];
+  range?: RangeSpec;
+};
+
+export type UpdateEventResult = {
+  eventVersion: number;
+  constraintsChanged: boolean;
+  receipt: string;
+};
+
 export type PublicEvent = {
   publicId: string;
   title: string;
@@ -68,6 +132,8 @@ export type ParticipantView = PublicEvent & {
   withdrawn: boolean;
   responseVersion: number;
   intervals: AvailabilityInterval[];
+  evaluated: EventConstraints;
+  staleness: Staleness;
 };
 
 export type SlotTally = {
@@ -90,6 +156,8 @@ export type OrganizerEvent = PublicEvent & {
     coverageMode: CoverageMode;
     updatedAt: InstantIso;
     intervals: AvailabilityInterval[];
+    evaluatedEventVersion: number;
+    staleness: Staleness;
   }>;
   tallies: SlotTally[];
   language: string;
@@ -98,6 +166,7 @@ export type OrganizerEvent = PublicEvent & {
 export type SubmitAvailabilityInput = {
   publicId: string;
   name: string;
+  eventVersion: number;
   intervals: AvailabilityInterval[];
   remainderUnavailable?: boolean;
 };
@@ -112,6 +181,7 @@ export type SubmitAvailabilityResult = {
 export type UpdateAvailabilityInput = {
   responseToken: string;
   responseVersion: number;
+  eventVersion: number;
   intervals: AvailabilityInterval[];
   remainderUnavailable?: boolean;
 };

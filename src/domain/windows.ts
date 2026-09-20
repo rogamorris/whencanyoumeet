@@ -14,7 +14,7 @@ import {
   spanDays,
   zonedLocal,
 } from "./time.ts";
-import type { Candidate, Interval, RangeSpec } from "./types.ts";
+import type { Candidate, ConstraintProposal, Constraints, Interval, RangeSpec, ValidConstraints } from "./types.ts";
 
 export function upcomingWeekdayRange(
   timeZone: string,
@@ -155,4 +155,31 @@ export function candidatesInWindows(
     );
   }
   return candidates;
+}
+
+export function parseConstraints(proposal: ConstraintProposal): ValidConstraints {
+  assertDuration(proposal.durationMinutes);
+  const timezone = assertTimeZone(proposal.timezone);
+  const raw =
+    proposal.windows && proposal.windows.length > 0
+      ? proposal.windows
+      : proposal.range
+        ? expandRange(timezone, proposal.range)
+        : (() => {
+            throw new DomainError("validation", "Provide windows or a date range.");
+          })();
+  const windows = normalizeWindows(raw).map((window) => ({
+    start: iso(window.start),
+    end: iso(window.end),
+  }));
+  candidatesInWindows(windows, proposal.durationMinutes);
+  return { durationMinutes: proposal.durationMinutes, windows } as ValidConstraints;
+}
+
+export function constraintsEqual(a: Constraints, b: Constraints): boolean {
+  if (a.durationMinutes !== b.durationMinutes) return false;
+  if (a.windows.length !== b.windows.length) return false;
+  return a.windows.every(
+    (window, index) => window.start === b.windows[index]!.start && window.end === b.windows[index]!.end,
+  );
 }
