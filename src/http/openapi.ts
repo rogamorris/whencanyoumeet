@@ -13,11 +13,24 @@ export function openApiDocument(serverUrl: string) {
         post: {
           summary: "Create poll",
           operationId: "createPoll",
+          parameters: [
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string" },
+              description:
+                "Replay the same create. The stored record is keyed only by this value. Same parsed body returns 201. A different parsed body returns 409 without the first organizer token.",
+            },
+          ],
           requestBody: {
             required: true,
             content: { "application/json": { schema: { $ref: "#/components/schemas/CreatePoll" } } },
           },
-          responses: { "201": { description: "Created, includes organizer token once" } },
+          responses: {
+            "201": { description: "Created, includes organizer token once" },
+            "409": { description: "Idempotency-Key reused with a different parsed body" },
+          },
         },
       },
       "/api/polls/{publicId}": {
@@ -51,6 +64,12 @@ export function openApiDocument(serverUrl: string) {
       },
       "/api/organizer/{token}/cancel": {
         post: { summary: "Cancel", operationId: "cancelPoll" },
+      },
+      "/api/organizer/{token}/close": {
+        post: { summary: "Close without a decision", operationId: "closePoll" },
+      },
+      "/api/organizer/{token}/delete": {
+        post: { summary: "Delete poll", operationId: "deletePoll" },
       },
     },
     components: {

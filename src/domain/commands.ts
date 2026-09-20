@@ -267,6 +267,9 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
     async close(organizerToken: string): Promise<{ receipt: string }> {
       const poll = await store.getPollByOrganizerHash(hashToken(organizerToken));
       if (!poll) throw new DomainError("not_found", "Organizer link not found.");
+      if (poll.status === "closed") {
+        return { receipt: "Collection closed without choosing a time." };
+      }
       if (poll.status !== "open") {
         throw new DomainError("closed", "Only an open poll can be closed without a decision.");
       }

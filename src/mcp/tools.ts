@@ -155,4 +155,36 @@ export function registerMcpTools(server: McpServer, commands: Commands): void {
       }
     },
   );
+
+  server.registerTool(
+    "close_poll",
+    {
+      title: "Close poll",
+      description: "Close collection without choosing a time. Only an open poll can close this way.",
+      inputSchema: z.object({ organizerToken: z.string() }),
+    },
+    async (input) => {
+      try {
+        return toolResult(await commands.close(input.organizerToken));
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "delete_poll",
+    {
+      title: "Delete poll",
+      description: "Delete a poll and its responses. The organizer token stops working.",
+      inputSchema: z.object({ organizerToken: z.string() }),
+    },
+    async (input) => {
+      try {
+        return toolResult(await commands.deletePoll(input.organizerToken));
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
 }

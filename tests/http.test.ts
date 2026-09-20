@@ -143,19 +143,52 @@ describe("http slice", () => {
         range,
       }),
     });
-    const poll = (await created.json()) as { publicId: string };
-    const again = await hono.request("/api/polls", {
+    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    const replay = await hono.request("/api/polls", {
       method: "POST",
       headers: { "content-type": "application/json", "Idempotency-Key": "k1" },
       body: JSON.stringify({
-        title: "Should not create another",
+        title: "Outside",
         durationMinutes: 60,
         timezone: "America/New_York",
         range,
       }),
     });
-    const againBody = (await again.json()) as { publicId: string };
-    expect(againBody.publicId).toBe(poll.publicId);
+    expect(replay.status).toBe(201);
+    const replayBody = (await replay.json()) as { publicId: string; organizerToken: string };
+    expect(replayBody.publicId).toBe(poll.publicId);
+    expect(replayBody.organizerToken).toBe(poll.organizerToken);
+
+    const reordered = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "k1" },
+      body: JSON.stringify({
+        range,
+        timezone: "America/New_York",
+        durationMinutes: 60,
+        title: "Outside",
+      }),
+    });
+    expect(reordered.status).toBe(201);
+    const reorderedBody = (await reordered.json()) as { organizerToken: string };
+    expect(reorderedBody.organizerToken).toBe(poll.organizerToken);
+
+    const clash = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "k1" },
+      body: JSON.stringify({
+        title: "Should not mint the first organizer token",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    expect(clash.status).toBe(409);
+    const clashText = await clash.text();
+    expect(clashText).not.toContain(poll.organizerToken);
+    const clashBody = JSON.parse(clashText) as { error?: { code: string }; organizerToken?: string };
+    expect(clashBody.error?.code).toBe("conflict");
+    expect(clashBody.organizerToken).toBeUndefined();
 
     const bad = await hono.request(`/api/polls/${poll.publicId}/responses`, {
       method: "POST",
@@ -334,5 +367,289 @@ describe("http slice", () => {
     expect(text).toContain("create_poll");
     expect(text).toContain("submit_availability");
     expect(text).toContain("finalize_poll");
+    expect(text).toContain("close_poll");
+    expect(text).toContain("delete_poll");
+  });
+
+  it("redirects HTML withdraw onto the response URL", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Withdraw",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string };
+    const listed = await hono.request(`/api/polls/${poll.publicId}`);
+    const publicEvent = (await listed.json()) as { candidates: Array<{ start: string; end: string }> };
+    const slot = publicEvent.candidates[0]!;
+    const answered = await hono.request(`/p/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        name: "Alex",
+        remainderUnavailable: "true",
+        [`slot:${slot.start}|${slot.end}`]: "available",
+      }),
+    });
+    expect(answered.status).toBe(303);
+    const responseUrl = answered.headers.get("location")!;
+    const responseToken = responseUrl.split("/r/")[1]!;
+    const page = await hono.request(`/r/${responseToken}`);
+    const html = await page.text();
+    const version = html.match(/name="responseVersion" value="(\d+)"/)?.[1];
+    expect(version).toBe("1");
+
+    const withdrawn = await hono.request(`/r/${responseToken}/withdraw`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ responseVersion: version! }),
+    });
+    expect(withdrawn.status).toBe(303);
+    expect(withdrawn.headers.get("location")).toMatch(new RegExp(`/r/${responseToken}$`));
+    expect(await withdrawn.text()).not.toContain("Could not complete that");
+
+    const after = await hono.request(`/r/${responseToken}`);
+    expect(await after.text()).toContain("This response is withdrawn.");
+  });
+
+  it("closes and deletes on JSON and the organizer HTML page", async () => {
+    const hono = await app();
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Lifecycle",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    const closed = await hono.request(`/api/organizer/${poll.organizerToken}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual({ receipt: "Collection closed without choosing a time." });
+
+    const closedAgain = await hono.request(`/api/organizer/${poll.organizerToken}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(closedAgain.status).toBe(200);
+    expect(await closedAgain.json()).toEqual({ receipt: "Collection closed without choosing a time." });
+
+    const late = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Sam", intervals: [] }),
+    });
+    expect(late.status).toBe(409);
+
+    const deleted = await hono.request(`/api/organizer/${poll.organizerToken}/delete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ receipt: "Poll deleted." });
+    const gone = await hono.request(`/api/organizer/${poll.organizerToken}`);
+    expect(gone.status).toBe(404);
+    expect((await hono.request(`/api/polls/${poll.publicId}`)).status).toBe(404);
+
+    const closedAfterDelete = await hono.request(`/api/organizer/${poll.organizerToken}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(closedAfterDelete.status).toBe(404);
+
+    const other = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "HTML delete",
+        durationMinutes: 60,
+        timezone: "America/New_York",
+        range,
+      }),
+    });
+    const htmlPoll = (await other.json()) as { organizerToken: string };
+    const organizerPage = await hono.request(`/o/${htmlPoll.organizerToken}`);
+    const organizerHtml = await organizerPage.text();
+    expect(organizerHtml).toContain(`/o/${htmlPoll.organizerToken}/close`);
+    expect(organizerHtml).toContain(`/o/${htmlPoll.organizerToken}/delete`);
+
+    const htmlDeleted = await hono.request(`/o/${htmlPoll.organizerToken}/delete`, { method: "POST" });
+    expect(htmlDeleted.status).toBe(303);
+    expect(htmlDeleted.headers.get("location")).toMatch(/\/$/);
+  });
+
+  it("returns 400 validation when a JSON update body fails the schema", async () => {
+    const hono = await app();
+    const invalid = await hono.request("/api/responses/not-a-token", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ responseVersion: "1" }),
+    });
+    expect(invalid.status).toBe(400);
+    const body = (await invalid.json()) as {
+      error: { code: string; message: string; details: Array<{ path: Array<string | number> }> };
+    };
+    expect(body.error.code).toBe("validation");
+    expect(body.error.message).toContain("responseVersion");
+    expect(body.error.details.some((issue) => issue.path.includes("responseVersion"))).toBe(true);
+  });
+
+  it("creates a new poll when the Idempotency-Key's original poll was deleted", async () => {
+    const hono = await app();
+    const payload = {
+      title: "Reusable key",
+      durationMinutes: 60,
+      timezone: "America/New_York",
+      range,
+    };
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "after-delete" },
+      body: JSON.stringify(payload),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/delete`, { method: "POST" })).status,
+    ).toBe(200);
+
+    const again = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "after-delete" },
+      body: JSON.stringify(payload),
+    });
+    expect(again.status).toBe(201);
+    const revived = (await again.json()) as { publicId: string; organizerToken: string };
+    expect(revived.organizerToken).not.toBe(poll.organizerToken);
+    expect(revived.publicId).not.toBe(poll.publicId);
+    expect((await hono.request(`/api/organizer/${revived.organizerToken}`)).status).toBe(200);
+    expect((await hono.request(`/api/organizer/${poll.organizerToken}`)).status).toBe(404);
+  });
+
+  it("creates, submits, and finalizes through MCP tools/call", async () => {
+    const hono = await app();
+    const mcpHeaders = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    };
+
+    const createdRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "create_poll",
+          arguments: {
+            title: "MCP loop",
+            durationMinutes: 60,
+            timezone: "America/New_York",
+            range,
+          },
+        },
+      }),
+    });
+    expect(createdRpc.status).toBe(200);
+    const created = mcpStructured<{
+      publicId: string;
+      organizerToken: string;
+      eventVersion: number;
+      resultsVersion: number;
+    }>(await createdRpc.text());
+    expect(created.publicId).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(created.organizerToken.length).toBeGreaterThan(20);
+
+    const submittedRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "submit_availability",
+          arguments: {
+            publicId: created.publicId,
+            name: "Alex",
+            remainderUnavailable: true,
+            intervals: [
+              {
+                start: "2026-09-21T13:00:00Z",
+                end: "2026-09-21T14:00:00Z",
+                state: "available",
+              },
+            ],
+          },
+        },
+      }),
+    });
+    expect(submittedRpc.status).toBe(200);
+    const submitted = mcpStructured<{ responseToken: string; responseVersion: number }>(
+      await submittedRpc.text(),
+    );
+    expect(submitted.responseVersion).toBe(1);
+    expect(submitted.responseToken.length).toBeGreaterThan(20);
+
+    const results = (await (
+      await hono.request(`/api/organizer/${created.organizerToken}`)
+    ).json()) as { resultsVersion: number };
+
+    const finalizedRpc = await hono.request("/mcp", {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "finalize_poll",
+          arguments: {
+            organizerToken: created.organizerToken,
+            start: "2026-09-21T13:00:00Z",
+            end: "2026-09-21T14:00:00Z",
+            eventVersion: created.eventVersion,
+            resultsVersion: results.resultsVersion,
+          },
+        },
+      }),
+    });
+    expect(finalizedRpc.status).toBe(200);
+    const finalized = mcpStructured<{ receipt: string; icsUrl: string }>(await finalizedRpc.text());
+    expect(finalized.receipt).toContain("Recorded a decision");
+    expect(finalized.icsUrl).toContain(`/o/${created.organizerToken}/event.ics`);
+
+    const publicEvent = (await (await hono.request(`/api/polls/${created.publicId}`)).json()) as {
+      status: string;
+      finalized?: { start: string; end: string };
+    };
+    expect(publicEvent.status).toBe("finalized");
+    expect(publicEvent.finalized).toEqual({
+      start: "2026-09-21T13:00:00Z",
+      end: "2026-09-21T14:00:00Z",
+    });
   });
 });
+
+function mcpStructured<T>(sse: string): T {
+  const line = sse.split("\n").find((row) => row.startsWith("data: "));
+  expect(line, "MCP SSE data line").toBeTruthy();
+  const message = JSON.parse(line!.slice(6)) as {
+    error?: unknown;
+    result?: { structuredContent?: T; isError?: boolean };
+  };
+  expect(message.error).toBeUndefined();
+  expect(message.result?.isError).not.toBe(true);
+  expect(message.result?.structuredContent).toEqual(expect.any(Object));
+  return message.result!.structuredContent as T;
+}

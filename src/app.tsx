@@ -3,14 +3,14 @@ import type { Context } from "hono";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import * as schema from "./db/schema.ts";
 import { migrate } from "./db/migrate.ts";
 import { createStore } from "./db/store.ts";
 import { createCommands } from "./domain/commands.ts";
 import { toIcs } from "./domain/ics.ts";
-import { DomainError } from "./domain/errors.ts";
+import { DomainError, isDomainError } from "./domain/errors.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
+import { replayCreatePoll, requestHash } from "./http/idempotency.ts";
 import {
   CreatePage,
   displayTimeZone,
@@ -144,19 +144,28 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
 
   app.post("/api/polls", async (c) => {
     try {
-      const idem = c.req.header("Idempotency-Key");
-      if (idem) {
-        const existing = await store.getIdempotency(`create:${idem}`);
-        if (existing) return c.json(JSON.parse(existing), 201);
-      }
       const parsed = createPollSchema.parse(await c.req.json());
-      const created = await commands.createPoll(parsed);
-      if (idem) await store.saveIdempotency(`create:${idem}`, JSON.stringify(created));
-      return c.json(created, 201);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return c.json({ error: { code: "validation", message: error.message } }, 400);
+      const idem = c.req.header("Idempotency-Key");
+      if (!idem) return c.json(await commands.createPoll(parsed), 201);
+      const key = `create:${idem}`;
+      const hash = requestHash(parsed);
+      const stored = await store.getIdempotency(key);
+      if (stored) {
+        const replayed = replayCreatePoll(stored, hash);
+        try {
+          await commands.getOrganizerEvent(replayed.organizerToken);
+          return c.json(replayed, 201);
+        } catch (error) {
+          if (!isDomainError(error) || error.code !== "not_found") throw error;
+        }
       }
+      const created = await commands.createPoll(parsed);
+      const record = JSON.stringify({ requestHash: hash, result: created });
+      const persisted = stored
+        ? await store.replaceIdempotency(key, record)
+        : await store.saveIdempotency(key, record);
+      return c.json(replayCreatePoll(persisted, hash), 201);
+    } catch (error) {
       return jsonError(c, error);
     }
   });
@@ -254,11 +263,11 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
   app.post("/r/:token/withdraw", (c) =>
     handle(c, async () => {
       const body = await readForm(c);
-      const result = await commands.withdrawResponse(
+      await commands.withdrawResponse(
         c.req.param("token"),
         Number(formString(body.responseVersion)),
       );
-      return c.html(<ErrorPage message={result.receipt} status={200} />);
+      return c.redirect(`/r/${c.req.param("token")}`, 303);
     }),
   );
 
@@ -333,6 +342,29 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       return c.redirect(`/o/${c.req.param("token")}`, 303);
     }),
   );
+
+  app.post("/api/organizer/:token/close", async (c) => {
+    try {
+      return c.json(await commands.close(c.req.param("token")));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
+
+  app.post("/o/:token/delete", (c) =>
+    handle(c, async () => {
+      await commands.deletePoll(c.req.param("token"));
+      return c.redirect("/", 303);
+    }),
+  );
+
+  app.post("/api/organizer/:token/delete", async (c) => {
+    try {
+      return c.json(await commands.deletePoll(c.req.param("token")));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  });
 
   app.get("/o/:token/event.ics", (c) =>
     handle(c, async () => {
