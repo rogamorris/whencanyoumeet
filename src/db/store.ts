@@ -311,16 +311,6 @@ export function createStore(db: Db) {
       });
     },
 
-    async bumpResultsVersion(pollId: string): Promise<number> {
-      const [row] = await db
-        .update(polls)
-        .set({ resultsVersion: sql`${polls.resultsVersion} + 1`, updatedAt: nowIso() })
-        .where(eq(polls.id, pollId))
-        .returning();
-      if (!row) throw new DomainError("not_found", "Poll not found.");
-      return row.resultsVersion;
-    },
-
     async getIdempotency(key: string): Promise<string | undefined> {
       const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, key)).limit(1);
       return row?.body;
