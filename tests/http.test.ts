@@ -734,20 +734,18 @@ describe("http slice", () => {
       candidates: Array<{ start: string; end: string }>;
     };
     const slot = event.candidates[0]!;
-    expect(
-      (
-        await hono.request(`/api/polls/${poll.publicId}/responses`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            name: "Alex",
-            eventVersion: poll.eventVersion,
-            remainderUnavailable: true,
-            intervals: [{ ...slot, state: "available" }],
-          }),
-        })
-      ).status,
-    ).toBe(201);
+    const submitted = await hono.request(`/api/polls/${poll.publicId}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Alex",
+        eventVersion: poll.eventVersion,
+        remainderUnavailable: true,
+        intervals: [{ ...slot, state: "available" }],
+      }),
+    });
+    expect(submitted.status).toBe(201);
+    const { responseToken } = (await submitted.json()) as { responseToken: string };
 
     const extra = { start: "2026-09-22T13:00:00Z", end: "2026-09-22T16:00:00Z" };
     const updated = await hono.request(`/api/organizer/${poll.organizerToken}/update`, {
@@ -774,6 +772,13 @@ describe("http slice", () => {
     expect(original).toEqual(expect.objectContaining({ available: 1, unknown: 0, unavailable: 0 }));
     const added = organizer.tallies.find((row) => row.start.startsWith("2026-09-22"));
     expect(added).toEqual(expect.objectContaining({ available: 0, unknown: 1, unavailable: 0 }));
+
+    const participantHtml = await (await hono.request(`/r/${responseToken}`)).text();
+    expect(participantHtml).toContain("The offered times changed since you answered.");
+    expect(participantHtml).not.toMatch(/name="remainderUnavailable"[^>]*checked/);
+    const editHtml = await (await hono.request(`/o/${poll.organizerToken}/edit`)).text();
+    expect(editHtml).not.toContain('type="datetime-local"');
+    expect(editHtml).toContain("YYYY-MM-DDTHH:mm");
   });
 
   it("does not inherit a yes onto a shorter duration", async () => {

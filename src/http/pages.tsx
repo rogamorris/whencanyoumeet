@@ -424,7 +424,9 @@ export function ParticipantPage(props: {
             type="checkbox"
             name="remainderUnavailable"
             value="true"
-            checked={props.event.coverageMode === "remainder_unavailable"}
+            checked={
+              props.event.coverageMode === "remainder_unavailable" && props.event.staleness === "current"
+            }
           />{" "}
           Mark remaining as unavailable
         </label>
@@ -726,8 +728,24 @@ export function EditPage(props: {
           <p class="muted">Blank rows are ignored. Enter local times in {props.displayTimeZone}.</p>
           {Array.from({ length: 3 }, () => (
             <p>
-              <input type="datetime-local" name="addStart[]" />{" "}
-              <input type="datetime-local" name="addEnd[]" />
+              <input
+                name="addStart[]"
+                type="text"
+                inputmode="numeric"
+                autocomplete="off"
+                spellcheck={false}
+                placeholder="YYYY-MM-DDTHH:mm"
+                title="YYYY-MM-DDTHH:mm"
+              />{" "}
+              <input
+                name="addEnd[]"
+                type="text"
+                inputmode="numeric"
+                autocomplete="off"
+                spellcheck={false}
+                placeholder="YYYY-MM-DDTHH:mm"
+                title="YYYY-MM-DDTHH:mm"
+              />
             </p>
           ))}
         </fieldset>
