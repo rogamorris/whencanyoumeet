@@ -18,9 +18,14 @@ export function webmcpScript(
       description: tool.description,
       inputSchema: tool.inputSchema,
       execute: async (input) => {
-        const headers = { Accept: "application/json", "Content-Type": "application/json" };
+        const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
+        const payload = { ...(input ?? {}) };
+        if (typeof payload.idempotencyKey === "string" && payload.idempotencyKey) {
+          headers["Idempotency-Key"] = payload.idempotencyKey;
+          delete payload.idempotencyKey;
+        }
         const init = { method: tool.method, headers };
-        if (tool.method !== "GET") init.body = JSON.stringify(input ?? {});
+        if (tool.method !== "GET") init.body = JSON.stringify(payload);
         const res = await fetch(tool.path, init);
         const data = await res.json();
         if (!res.ok) {

@@ -58,14 +58,17 @@ export function parseEvaluated(json: string): EventConstraints {
 
 export function createStore(db: Db) {
   return {
-    async insertPoll(input: {
-      id: string;
-      publicId: string;
-      organizerTokenHash: string;
-      metadata: PollMetadata;
-      constraints: ValidConstraints;
-    }): Promise<PollRecord> {
-      return db.transaction(async (tx) => {
+    async insertPoll(
+      input: {
+        id: string;
+        publicId: string;
+        organizerTokenHash: string;
+        metadata: PollMetadata;
+        constraints: ValidConstraints;
+      },
+      tx?: Tx,
+    ): Promise<PollRecord> {
+      return transact(db, tx, async (tx) => {
         const now = nowIso();
         const [poll] = await tx
           .insert(polls)
@@ -94,8 +97,8 @@ export function createStore(db: Db) {
       });
     },
 
-    async getPollByPublicId(publicId: string): Promise<PollRecord | undefined> {
-      const [poll] = await db.select().from(polls).where(eq(polls.publicId, publicId)).limit(1);
+    async getPollByPublicId(publicId: string, tx?: Tx): Promise<PollRecord | undefined> {
+      const [poll] = await (tx ?? db).select().from(polls).where(eq(polls.publicId, publicId)).limit(1);
       return poll;
     },
 
@@ -104,13 +107,13 @@ export function createStore(db: Db) {
       return poll;
     },
 
-    async getPollById(id: string): Promise<PollRecord | undefined> {
-      const [poll] = await db.select().from(polls).where(eq(polls.id, id)).limit(1);
+    async getPollById(id: string, tx?: Tx): Promise<PollRecord | undefined> {
+      const [poll] = await (tx ?? db).select().from(polls).where(eq(polls.id, id)).limit(1);
       return poll;
     },
 
-    async listWindows(pollId: string): Promise<Interval[]> {
-      const rows = await db.select().from(windows).where(eq(windows.pollId, pollId));
+    async listWindows(pollId: string, tx?: Tx): Promise<Interval[]> {
+      const rows = await (tx ?? db).select().from(windows).where(eq(windows.pollId, pollId));
       return rows
         .map((row) => ({ start: row.startAt, end: row.endAt }))
         .sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
@@ -213,8 +216,8 @@ export function createStore(db: Db) {
       await db.delete(polls).where(eq(polls.id, pollId));
     },
 
-    async countActive(pollId: string): Promise<number> {
-      const [row] = await db
+    async countActive(pollId: string, tx?: Tx): Promise<number> {
+      const [row] = await (tx ?? db)
         .select({ n: count() })
         .from(participants)
         .where(and(eq(participants.pollId, pollId), eq(participants.withdrawn, false)));
@@ -226,20 +229,24 @@ export function createStore(db: Db) {
       return hydrateParticipants(db, rows);
     },
 
-    async getParticipantByTokenHash(hash: string): Promise<Participant | undefined> {
-      const [row] = await db.select().from(participants).where(eq(participants.responseTokenHash, hash)).limit(1);
+    async getParticipantByTokenHash(hash: string, tx?: Tx): Promise<Participant | undefined> {
+      const executor = tx ?? db;
+      const [row] = await executor.select().from(participants).where(eq(participants.responseTokenHash, hash)).limit(1);
       if (!row) return undefined;
-      const [participant] = await hydrateParticipants(db, [row]);
+      const [participant] = await hydrateParticipants(executor, [row]);
       return participant;
     },
 
-    async insertParticipant(input: {
-      pollId: string;
-      displayName: string;
-      responseTokenHash: string;
-      answer: Answer;
-    }): Promise<void> {
-      await db.transaction(async (tx) => {
+    async insertParticipant(
+      input: {
+        pollId: string;
+        displayName: string;
+        responseTokenHash: string;
+        answer: Answer;
+      },
+      tx?: Tx,
+    ): Promise<void> {
+      await transact(db, tx, async (tx) => {
         await bumpResultsForAnswer(
           tx,
           input.pollId,
@@ -271,8 +278,9 @@ export function createStore(db: Db) {
       id: string,
       expectedVersion: number,
       patch: { withdrawn: boolean; answer?: Answer },
+      tx?: Tx,
     ): Promise<void> {
-      await db.transaction(async (tx) => {
+      await transact(db, tx, async (tx) => {
         const [existing] = await tx.select().from(participants).where(eq(participants.id, id)).limit(1);
         if (!existing) throw new DomainError("not_found", "Response not found.");
         if (patch.answer) {
@@ -316,30 +324,41 @@ export function createStore(db: Db) {
       return row?.body;
     },
 
-    async saveIdempotency(key: string, body: string): Promise<string> {
-      await db.insert(idempotencyKeys).values({ key, body, createdAt: nowIso() }).onConflictDoNothing();
-      const stored = await this.getIdempotency(key);
-      if (!stored) {
-        throw new DomainError("conflict", "Could not persist idempotency record.");
-      }
-      return stored;
+    async commitBoundWrite(key: string, persist: (tx: Tx) => Promise<string>): Promise<string> {
+      return db.transaction(async (tx) => {
+        const [claimed] = await tx
+          .insert(idempotencyKeys)
+          .values({ key, body: "", createdAt: nowIso() })
+          .onConflictDoNothing()
+          .returning({ key: idempotencyKeys.key });
+        if (!claimed) {
+          const [winner] = await tx.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, key)).limit(1);
+          if (!winner?.body) {
+            throw new DomainError("conflict", "Could not persist idempotency record.");
+          }
+          return winner.body;
+        }
+        const body = await persist(tx);
+        await tx.update(idempotencyKeys).set({ body }).where(eq(idempotencyKeys.key, key));
+        return body;
+      });
     },
 
-    async replaceIdempotency(key: string, body: string): Promise<string> {
-      await db
-        .update(idempotencyKeys)
-        .set({ body, createdAt: nowIso() })
-        .where(eq(idempotencyKeys.key, key));
-      const stored = await this.getIdempotency(key);
-      if (!stored) {
-        throw new DomainError("conflict", "Could not persist idempotency record.");
-      }
-      return stored;
+    async replaceBoundWrite(key: string, persist: (tx: Tx) => Promise<string>): Promise<string> {
+      return db.transaction(async (tx) => {
+        const body = await persist(tx);
+        await tx.update(idempotencyKeys).set({ body, createdAt: nowIso() }).where(eq(idempotencyKeys.key, key));
+        return body;
+      });
     },
   };
 }
 
 export type Store = ReturnType<typeof createStore>;
+
+function transact<T>(db: Db, tx: Tx | undefined, run: (tx: Tx) => Promise<T>): Promise<T> {
+  return tx ? run(tx) : db.transaction(run);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

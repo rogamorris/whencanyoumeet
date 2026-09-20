@@ -1,6 +1,19 @@
 import { MAX_PARTICIPANTS, MAX_TITLE, PUBLIC_BASE_URL, STEP_MINUTES } from "../config.ts";
-import type { PollRecord, Store } from "../db/store.ts";
+import type { PollRecord, Store, Tx } from "../db/store.ts";
 import { DomainError } from "./errors.ts";
+import {
+  createFingerprint,
+  parseOptionalKey,
+  replayBound,
+  requestHash,
+  serializeRecord,
+  storageKey,
+  submitFingerprint,
+  updateFingerprint,
+  withdrawFingerprint,
+  type IdempotencyResult,
+  type WriteKind,
+} from "./idempotency.ts";
 import { resultsLanguage, sortTallies, staleness, tallyCandidates, validatePaintedIntervals } from "./overlap.ts";
 import { hashToken, newId, publicId, randomToken } from "./tokens.ts";
 import { assertTimeZone, parseInterval } from "./time.ts";
@@ -16,8 +29,11 @@ import type {
   SubmitAvailabilityInput,
   SubmitAvailabilityResult,
   UpdateAvailabilityInput,
+  UpdateAvailabilityResult,
   UpdateEventInput,
   UpdateEventResult,
+  WithdrawResponseInput,
+  WithdrawResponseResult,
 } from "./types.ts";
 import { LIVE_STATUSES, REOPENABLE_STATUSES } from "./types.ts";
 import { candidatesInWindows, constraintsEqual, parseConstraints } from "./windows.ts";
@@ -73,8 +89,8 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
     };
   }
 
-  async function currentConstraints(poll: PollRecord) {
-    const windowRows = await store.listWindows(poll.id);
+  async function currentConstraints(poll: PollRecord, tx?: Tx) {
+    const windowRows = await store.listWindows(poll.id, tx);
     return {
       eventVersion: poll.eventVersion,
       durationMinutes: poll.durationMinutes,
@@ -107,6 +123,46 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
     };
   }
 
+  async function bindWrite<K extends WriteKind>(opts: {
+    kind: K;
+    rawKey: string | undefined;
+    scope?: string;
+    fingerprint: unknown;
+    live: (result: IdempotencyResult[K]) => Promise<boolean>;
+    onDead: "replace" | "gone";
+    write: (tx?: Tx) => Promise<IdempotencyResult[K]>;
+  }): Promise<IdempotencyResult[K]> {
+    const key = parseOptionalKey(opts.rawKey);
+    if (!key) return opts.write();
+    const storedKey = storageKey(opts.kind, key, opts.scope);
+    const hash = requestHash(opts.fingerprint);
+    const stored = await store.getIdempotency(storedKey);
+    if (stored) {
+      const result = replayBound(stored, hash, opts.kind);
+      if (await opts.live(result)) return result;
+      if (opts.onDead === "gone") {
+        throw new DomainError(
+          "not_found",
+          opts.kind === "create" ? "Organizer link not found." : "Response not found.",
+        );
+      }
+      return replayBound(
+        await store.replaceBoundWrite(storedKey, async (tx) =>
+          serializeRecord(opts.kind, hash, await opts.write(tx)),
+        ),
+        hash,
+        opts.kind,
+      );
+    }
+    return replayBound(
+      await store.commitBoundWrite(storedKey, async (tx) =>
+        serializeRecord(opts.kind, hash, await opts.write(tx)),
+      ),
+      hash,
+      opts.kind,
+    );
+  }
+
   return {
     async createPoll(input: CreatePollInput): Promise<CreatePollResult> {
       const title = parseTitle(input.title);
@@ -117,29 +173,41 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
         windows: input.windows,
         range: input.range,
       });
-      const organizerToken = randomToken();
-      const pollPublicId = publicId();
-      await store.insertPoll({
-        id: newId("poll"),
-        publicId: pollPublicId,
-        organizerTokenHash: hashToken(organizerToken),
-        metadata: {
-          title,
-          context: input.context?.trim() ? input.context.trim() : null,
-          location: input.location?.trim() ? input.location.trim() : null,
-          timezone,
+      return bindWrite({
+        kind: "create",
+        rawKey: input.idempotencyKey,
+        fingerprint: createFingerprint(input),
+        live: async (result) => Boolean(await store.getPollByOrganizerHash(hashToken(result.organizerToken))),
+        onDead: "replace",
+        write: async (tx) => {
+          const organizerToken = randomToken();
+          const pollPublicId = publicId();
+          await store.insertPoll(
+            {
+              id: newId("poll"),
+              publicId: pollPublicId,
+              organizerTokenHash: hashToken(organizerToken),
+              metadata: {
+                title,
+                context: input.context?.trim() ? input.context.trim() : null,
+                location: input.location?.trim() ? input.location.trim() : null,
+                timezone,
+              },
+              constraints,
+            },
+            tx,
+          );
+          const { publicUrl, organizerUrl } = urls(pollPublicId, organizerToken);
+          return {
+            publicId: pollPublicId,
+            publicUrl,
+            organizerToken,
+            organizerUrl: organizerUrl!,
+            eventVersion: 1,
+            resultsVersion: 1,
+          };
         },
-        constraints,
       });
-      const { publicUrl, organizerUrl } = urls(pollPublicId, organizerToken);
-      return {
-        publicId: pollPublicId,
-        publicUrl,
-        organizerToken,
-        organizerUrl: organizerUrl!,
-        eventVersion: 1,
-        resultsVersion: 1,
-      };
     },
 
     async getPublicEvent(pollPublicId: string): Promise<PublicEvent> {
@@ -200,78 +268,116 @@ export function createCommands(store: Store, publicBaseUrl = PUBLIC_BASE_URL) {
     },
 
     async submitAvailability(input: SubmitAvailabilityInput): Promise<SubmitAvailabilityResult> {
-      const poll = await store.getPollByPublicId(input.publicId);
-      if (!poll) throw new DomainError("not_found", "Poll not found.");
-      if (poll.status !== "open") {
-        throw new DomainError("closed", "This poll is not accepting responses.");
-      }
-      const name = input.name.trim();
-      if (!name) throw new DomainError("validation", "A display name is required.");
-      if ((await store.countActive(poll.id)) >= MAX_PARTICIPANTS) {
-        throw new DomainError("limit", `This poll is limited to ${MAX_PARTICIPANTS} participants.`);
-      }
-      if (input.eventVersion !== poll.eventVersion) {
-        throw new DomainError("stale_version", STALE_EVENT);
-      }
-      const current = await currentConstraints(poll);
-      const intervals = validatePaintedIntervals(input.intervals, current.windows);
-      const responseToken = randomToken();
-      await store.insertParticipant({
-        pollId: poll.id,
-        displayName: name,
-        responseTokenHash: hashToken(responseToken),
-        answer: {
-          evaluated: current,
-          coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
-          intervals,
+      return bindWrite({
+        kind: "submit",
+        rawKey: input.idempotencyKey,
+        scope: input.publicId,
+        fingerprint: submitFingerprint(input),
+        live: async (result) => Boolean(await store.getParticipantByTokenHash(hashToken(result.responseToken))),
+        onDead: "gone",
+        write: async (tx) => {
+          const name = input.name.trim();
+          if (!name) throw new DomainError("validation", "A display name is required.");
+          const poll = await store.getPollByPublicId(input.publicId, tx);
+          if (!poll) throw new DomainError("not_found", "Poll not found.");
+          if (poll.status !== "open") {
+            throw new DomainError("closed", "This poll is not accepting responses.");
+          }
+          if ((await store.countActive(poll.id, tx)) >= MAX_PARTICIPANTS) {
+            throw new DomainError("limit", `This poll is limited to ${MAX_PARTICIPANTS} participants.`);
+          }
+          if (input.eventVersion !== poll.eventVersion) {
+            throw new DomainError("stale_version", STALE_EVENT);
+          }
+          const current = await currentConstraints(poll, tx);
+          const intervals = validatePaintedIntervals(input.intervals, current.windows);
+          const responseToken = randomToken();
+          await store.insertParticipant(
+            {
+              pollId: poll.id,
+              displayName: name,
+              responseTokenHash: hashToken(responseToken),
+              answer: {
+                evaluated: current,
+                coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
+                intervals,
+              },
+            },
+            tx,
+          );
+          const { responseUrl } = urls(poll.publicId, undefined, responseToken);
+          return {
+            responseToken,
+            responseUrl: responseUrl!,
+            responseVersion: 1,
+            receipt: "Saved availability. This did not reserve calendar time or send invitations.",
+          };
         },
       });
-      const { responseUrl } = urls(poll.publicId, undefined, responseToken);
-      return {
-        responseToken,
-        responseUrl: responseUrl!,
-        responseVersion: 1,
-        receipt: "Saved availability. This did not reserve calendar time or send invitations.",
-      };
     },
 
-    async updateAvailability(input: UpdateAvailabilityInput): Promise<{ responseVersion: number; receipt: string }> {
-      const participant = await store.getParticipantByTokenHash(hashToken(input.responseToken));
-      if (!participant) throw new DomainError("not_found", "Response not found.");
-      const poll = await store.getPollById(participant.pollId);
-      if (!poll) throw new DomainError("not_found", "Poll not found.");
-      if (poll.status !== "open") {
-        throw new DomainError("closed", "This poll is not accepting response edits.");
-      }
-      if (input.eventVersion !== poll.eventVersion) {
-        throw new DomainError("stale_version", STALE_EVENT);
-      }
-      const current = await currentConstraints(poll);
-      const painted = validatePaintedIntervals(input.intervals, current.windows);
-      await store.updateParticipant(participant.id, input.responseVersion, {
-        withdrawn: false,
-        answer: {
-          evaluated: current,
-          coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
-          intervals: painted,
+    async updateAvailability(input: UpdateAvailabilityInput): Promise<UpdateAvailabilityResult> {
+      return bindWrite({
+        kind: "update",
+        rawKey: input.idempotencyKey,
+        scope: hashToken(input.responseToken),
+        fingerprint: updateFingerprint(input),
+        live: async () => Boolean(await store.getParticipantByTokenHash(hashToken(input.responseToken))),
+        onDead: "gone",
+        write: async (tx) => {
+          const participant = await store.getParticipantByTokenHash(hashToken(input.responseToken), tx);
+          if (!participant) throw new DomainError("not_found", "Response not found.");
+          const poll = await store.getPollById(participant.pollId, tx);
+          if (!poll) throw new DomainError("not_found", "Poll not found.");
+          if (poll.status !== "open") {
+            throw new DomainError("closed", "This poll is not accepting response edits.");
+          }
+          if (input.eventVersion !== poll.eventVersion) {
+            throw new DomainError("stale_version", STALE_EVENT);
+          }
+          const current = await currentConstraints(poll, tx);
+          const painted = validatePaintedIntervals(input.intervals, current.windows);
+          await store.updateParticipant(
+            participant.id,
+            input.responseVersion,
+            {
+              withdrawn: false,
+              answer: {
+                evaluated: current,
+                coverageMode: input.remainderUnavailable ? "remainder_unavailable" : "partial",
+                intervals: painted,
+              },
+            },
+            tx,
+          );
+          return {
+            responseVersion: input.responseVersion + 1,
+            receipt: "Updated availability. This did not reserve calendar time.",
+          };
         },
       });
-      return {
-        responseVersion: input.responseVersion + 1,
-        receipt: "Updated availability. This did not reserve calendar time.",
-      };
     },
 
-    async withdrawResponse(responseToken: string, responseVersion: number): Promise<{ receipt: string }> {
-      const participant = await store.getParticipantByTokenHash(hashToken(responseToken));
-      if (!participant) throw new DomainError("not_found", "Response not found.");
-      const poll = await store.getPollById(participant.pollId);
-      if (!poll) throw new DomainError("not_found", "Poll not found.");
-      if (poll.status !== "open") {
-        throw new DomainError("closed", "This poll is not accepting withdrawals.");
-      }
-      await store.updateParticipant(participant.id, responseVersion, { withdrawn: true });
-      return { receipt: "Response withdrawn." };
+    async withdrawResponse(input: WithdrawResponseInput): Promise<WithdrawResponseResult> {
+      return bindWrite({
+        kind: "withdraw",
+        rawKey: input.idempotencyKey,
+        scope: hashToken(input.responseToken),
+        fingerprint: withdrawFingerprint(input),
+        live: async () => Boolean(await store.getParticipantByTokenHash(hashToken(input.responseToken))),
+        onDead: "gone",
+        write: async (tx) => {
+          const participant = await store.getParticipantByTokenHash(hashToken(input.responseToken), tx);
+          if (!participant) throw new DomainError("not_found", "Response not found.");
+          const poll = await store.getPollById(participant.pollId, tx);
+          if (!poll) throw new DomainError("not_found", "Poll not found.");
+          if (poll.status !== "open") {
+            throw new DomainError("closed", "This poll is not accepting withdrawals.");
+          }
+          await store.updateParticipant(participant.id, input.responseVersion, { withdrawn: true }, tx);
+          return { receipt: "Response withdrawn." };
+        },
+      });
     },
 
     async finalize(input: FinalizeInput): Promise<{ receipt: string; icsUrl: string }> {
