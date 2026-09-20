@@ -58,5 +58,16 @@ export async function migrate(client: PGlite): Promise<void> {
     CREATE INDEX IF NOT EXISTS windows_poll_id_idx ON windows(poll_id);
     CREATE INDEX IF NOT EXISTS participants_poll_id_idx ON participants(poll_id);
     CREATE INDEX IF NOT EXISTS intervals_participant_id_idx ON intervals(participant_id);
+
+    ALTER TABLE participants ADD COLUMN IF NOT EXISTS evaluated TEXT;
+    UPDATE participants p SET evaluated = (
+      SELECT json_build_object(
+        'eventVersion', polls.event_version,
+        'durationMinutes', polls.duration_minutes,
+        'windows', COALESCE((SELECT json_agg(json_build_object('start', w.start_at, 'end', w.end_at) ORDER BY w.start_at)
+                             FROM windows w WHERE w.poll_id = polls.id), '[]'::json))
+      FROM polls WHERE polls.id = p.poll_id)
+    WHERE p.evaluated IS NULL;
+    ALTER TABLE participants ALTER COLUMN evaluated SET NOT NULL;
   `);
 }

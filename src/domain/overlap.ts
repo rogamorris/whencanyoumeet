@@ -2,13 +2,16 @@ import { Temporal } from "temporal-polyfill";
 import { DomainError } from "./errors.ts";
 import { covers, intervalInsideWindows, parseInstant, parseInterval } from "./time.ts";
 import type {
+  Answer,
   AvailabilityInterval,
   AvailabilityState,
   Candidate,
-  CoverageMode,
+  EventConstraints,
   FourState,
   Interval,
+  Participant,
   SlotTally,
+  Staleness,
 } from "./types.ts";
 import { MAX_INTERVALS_PER_RESPONSE } from "../config.ts";
 
@@ -54,28 +57,42 @@ export function stateForCandidate(
 }
 
 export function effectiveState(
-  intervals: AvailabilityInterval[],
+  answer: Answer,
   candidate: Candidate,
-  coverageMode: CoverageMode,
+  current: EventConstraints,
 ): FourState {
-  const state = stateForCandidate(intervals, candidate);
-  if (state === "unknown" && coverageMode === "remainder_unavailable") return "unavailable";
-  return state;
+  if (answer.evaluated.durationMinutes !== current.durationMinutes) return "unknown";
+  const painted = stateForCandidate(answer.intervals, candidate);
+  if (painted !== "unknown") return painted;
+  if (
+    answer.coverageMode === "remainder_unavailable" &&
+    intervalInsideWindows(
+      parseInstant(candidate.start),
+      parseInstant(candidate.end),
+      answer.evaluated.windows.map(parseInterval),
+    )
+  ) {
+    return "unavailable";
+  }
+  return "unknown";
+}
+
+export function staleness(answer: Answer, current: EventConstraints): Staleness {
+  if (answer.evaluated.durationMinutes !== current.durationMinutes) return "reevaluation_required";
+  if (answer.evaluated.eventVersion !== current.eventVersion) return "windows_changed";
+  return "current";
 }
 
 export function tallyCandidates(
   candidates: Candidate[],
-  participants: Array<{
-    withdrawn: boolean;
-    coverageMode: CoverageMode;
-    intervals: AvailabilityInterval[];
-  }>,
+  participants: Array<Pick<Participant, "withdrawn" | "answer">>,
+  current: EventConstraints,
 ): SlotTally[] {
   const active = participants.filter((participant) => !participant.withdrawn);
   return candidates.map((candidate) => {
     const counts = { available: 0, tentative: 0, unavailable: 0, unknown: 0 };
     for (const participant of active) {
-      counts[effectiveState(participant.intervals, candidate, participant.coverageMode)] += 1;
+      counts[effectiveState(participant.answer, candidate, current)] += 1;
     }
     const n = active.length;
     return {
@@ -86,6 +103,19 @@ export function tallyCandidates(
   });
 }
 
+export function remapPaintedAnswers(
+  intervals: AvailabilityInterval[],
+  candidates: Candidate[],
+): Map<string, AvailabilityState> {
+  const mapped = new Map<string, AvailabilityState>();
+  for (const candidate of candidates) {
+    const state = stateForCandidate(intervals, candidate);
+    if (state === "unknown") continue;
+    mapped.set(`${candidate.start}|${candidate.end}`, state);
+  }
+  return mapped;
+}
+
 export function sortTallies(tallies: SlotTally[]): SlotTally[] {
   return [...tallies].sort((a, b) => {
     if (a.fullSupport !== b.fullSupport) return a.fullSupport ? -1 : 1;
@@ -94,7 +124,10 @@ export function sortTallies(tallies: SlotTally[]): SlotTally[] {
   });
 }
 
-export function resultsLanguage(respondentCount: number): string {
+export function resultsLanguage(respondentCount: number, reevaluationRequired: number): string {
   if (respondentCount === 0) return "No responses yet. These counts describe respondents, not all invitees.";
-  return `Counts describe all ${respondentCount} respondent${respondentCount === 1 ? "" : "s"}, not an unknown invitation list.`;
+  const base = `Counts describe all ${respondentCount} respondent${respondentCount === 1 ? "" : "s"}, not an unknown invitation list.`;
+  if (reevaluationRequired === 0) return base;
+  const verb = reevaluationRequired === 1 ? "has" : "have";
+  return `${base} ${reevaluationRequired} ${verb} not re-evaluated since the duration changed.`;
 }

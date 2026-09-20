@@ -62,6 +62,19 @@ export function openApiDocument(serverUrl: string) {
       "/api/organizer/{token}/finalize": {
         post: { summary: "Finalize", operationId: "finalizePoll" },
       },
+      "/api/organizer/{token}/update": {
+        post: {
+          summary: "Edit poll",
+          operationId: "updateEvent",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/UpdateEvent" } } },
+          },
+        },
+      },
+      "/api/organizer/{token}/reopen": {
+        post: { summary: "Reopen collection", operationId: "reopenPoll" },
+      },
       "/api/organizer/{token}/cancel": {
         post: { summary: "Cancel", operationId: "cancelPoll" },
       },
@@ -83,6 +96,40 @@ export function openApiDocument(serverUrl: string) {
             timezone: { type: "string" },
             range: { type: "object" },
             windows: { type: "array" },
+          },
+        },
+        UpdateEvent: {
+          type: "object",
+          required: ["eventVersion"],
+          properties: {
+            eventVersion: { type: "integer" },
+            title: { type: "string" },
+            context: { type: ["string", "null"] },
+            location: { type: ["string", "null"] },
+            timezone: { type: "string" },
+            durationMinutes: { type: "integer" },
+            windows: { type: "array" },
+            range: { type: "object" },
+          },
+        },
+        SubmitAvailability: {
+          type: "object",
+          required: ["name", "eventVersion"],
+          properties: {
+            name: { type: "string" },
+            eventVersion: { type: "integer" },
+            remainderUnavailable: { type: "boolean" },
+            intervals: { type: "array" },
+          },
+        },
+        UpdateAvailability: {
+          type: "object",
+          required: ["responseVersion", "eventVersion"],
+          properties: {
+            responseVersion: { type: "integer" },
+            eventVersion: { type: "integer" },
+            remainderUnavailable: { type: "boolean" },
+            intervals: { type: "array" },
           },
         },
       },
