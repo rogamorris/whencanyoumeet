@@ -9,7 +9,7 @@ import { migrate } from "./db/migrate.ts";
 import { createStore } from "./db/store.ts";
 import { createCommands } from "./domain/commands.ts";
 import { toIcs } from "./domain/ics.ts";
-import { DomainError } from "./domain/errors.ts";
+import { DomainError, isDomainError } from "./domain/errors.ts";
 import { errorPayload, jsonError, wantsJson } from "./http/errors.ts";
 import { replayCreatePoll, requestHash } from "./http/idempotency.ts";
 import {
@@ -150,12 +150,22 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
       if (!idem) return c.json(await commands.createPoll(parsed), 201);
       const key = `create:${idem}`;
       const hash = requestHash(parsed);
-      let stored = await store.getIdempotency(key);
-      if (!stored) {
-        const created = await commands.createPoll(parsed);
-        stored = await store.saveIdempotency(key, JSON.stringify({ requestHash: hash, result: created }));
+      const stored = await store.getIdempotency(key);
+      if (stored) {
+        const replayed = replayCreatePoll(stored, hash);
+        try {
+          await commands.getOrganizerEvent(replayed.organizerToken);
+          return c.json(replayed, 201);
+        } catch (error) {
+          if (!isDomainError(error) || error.code !== "not_found") throw error;
+        }
       }
-      return c.json(replayCreatePoll(stored, hash), 201);
+      const created = await commands.createPoll(parsed);
+      const record = JSON.stringify({ requestHash: hash, result: created });
+      const persisted = stored
+        ? await store.replaceIdempotency(key, record)
+        : await store.saveIdempotency(key, record);
+      return c.json(replayCreatePoll(persisted, hash), 201);
     } catch (error) {
       if (error instanceof z.ZodError) {
         return c.json({ error: { code: "validation", message: error.message } }, 400);

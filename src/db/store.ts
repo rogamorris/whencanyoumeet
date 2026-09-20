@@ -238,6 +238,18 @@ export function createStore(db: Db) {
       }
       return stored;
     },
+
+    async replaceIdempotency(key: string, body: string): Promise<string> {
+      await db
+        .update(idempotencyKeys)
+        .set({ body, createdAt: nowIso() })
+        .where(eq(idempotencyKeys.key, key));
+      const stored = await this.getIdempotency(key);
+      if (!stored) {
+        throw new DomainError("conflict", "Could not persist idempotency record.");
+      }
+      return stored;
+    },
   };
 }
 

@@ -624,7 +624,11 @@ export function OrganizerPage(props: { event: OrganizerEvent; organizerToken: st
           </button>
         </form>
       ) : null}
-      <form method="post" action={`/o/${props.organizerToken}/delete`}>
+      <form
+        method="post"
+        action={`/o/${props.organizerToken}/delete`}
+        onsubmit="return confirm('Delete this poll and every response? This cannot be undone.')"
+      >
         <button class="secondary" type="submit">
           Delete poll
         </button>

@@ -474,6 +474,37 @@ describe("http slice", () => {
     expect(htmlDeleted.headers.get("location")).toMatch(/\/$/);
   });
 
+  it("creates a new poll when the Idempotency-Key's original poll was deleted", async () => {
+    const hono = await app();
+    const payload = {
+      title: "Reusable key",
+      durationMinutes: 60,
+      timezone: "America/New_York",
+      range,
+    };
+    const created = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "after-delete" },
+      body: JSON.stringify(payload),
+    });
+    const poll = (await created.json()) as { publicId: string; organizerToken: string };
+    expect(
+      (await hono.request(`/api/organizer/${poll.organizerToken}/delete`, { method: "POST" })).status,
+    ).toBe(200);
+
+    const again = await hono.request("/api/polls", {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": "after-delete" },
+      body: JSON.stringify(payload),
+    });
+    expect(again.status).toBe(201);
+    const revived = (await again.json()) as { publicId: string; organizerToken: string };
+    expect(revived.organizerToken).not.toBe(poll.organizerToken);
+    expect(revived.publicId).not.toBe(poll.publicId);
+    expect((await hono.request(`/api/organizer/${revived.organizerToken}`)).status).toBe(200);
+    expect((await hono.request(`/api/organizer/${poll.organizerToken}`)).status).toBe(404);
+  });
+
   it("creates, submits, and finalizes through MCP tools/call", async () => {
     const hono = await app();
     const mcpHeaders = {
