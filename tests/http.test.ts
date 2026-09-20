@@ -437,6 +437,13 @@ describe("http slice", () => {
     expect(closed.status).toBe(200);
     expect(await closed.json()).toEqual({ receipt: "Collection closed without choosing a time." });
 
+    const closedAgain = await hono.request(`/api/organizer/${poll.organizerToken}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(closedAgain.status).toBe(200);
+    expect(await closedAgain.json()).toEqual({ receipt: "Collection closed without choosing a time." });
+
     const late = await hono.request(`/api/polls/${poll.publicId}/responses`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -452,6 +459,13 @@ describe("http slice", () => {
     expect(await deleted.json()).toEqual({ receipt: "Poll deleted." });
     const gone = await hono.request(`/api/organizer/${poll.organizerToken}`);
     expect(gone.status).toBe(404);
+    expect((await hono.request(`/api/polls/${poll.publicId}`)).status).toBe(404);
+
+    const closedAfterDelete = await hono.request(`/api/organizer/${poll.organizerToken}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(closedAfterDelete.status).toBe(404);
 
     const other = await hono.request("/api/polls", {
       method: "POST",
@@ -472,6 +486,22 @@ describe("http slice", () => {
     const htmlDeleted = await hono.request(`/o/${htmlPoll.organizerToken}/delete`, { method: "POST" });
     expect(htmlDeleted.status).toBe(303);
     expect(htmlDeleted.headers.get("location")).toMatch(/\/$/);
+  });
+
+  it("returns 400 validation when a JSON update body fails the schema", async () => {
+    const hono = await app();
+    const invalid = await hono.request("/api/responses/not-a-token", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ responseVersion: "1" }),
+    });
+    expect(invalid.status).toBe(400);
+    const body = (await invalid.json()) as {
+      error: { code: string; message: string; details: Array<{ path: Array<string | number> }> };
+    };
+    expect(body.error.code).toBe("validation");
+    expect(body.error.message).toContain("responseVersion");
+    expect(body.error.details.some((issue) => issue.path.includes("responseVersion"))).toBe(true);
   });
 
   it("creates a new poll when the Idempotency-Key's original poll was deleted", async () => {

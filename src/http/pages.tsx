@@ -198,34 +198,6 @@ function weekdayBoxes() {
   ));
 }
 
-export function CreatedPage(props: { publicUrl: string; organizerUrl: string }) {
-  return (
-    <Layout title="Poll created">
-      <h1>Poll created</h1>
-      <div class="warn">
-        Save the organizer link. It is not on the public page. Losing it may make management
-        impossible.
-      </div>
-      <div class="card">
-        <p>
-          <strong>Share this invitation</strong>
-          <br />
-          <a class="secret" href={props.publicUrl}>
-            {props.publicUrl}
-          </a>
-        </p>
-        <p>
-          <strong>Private organizer link</strong>
-          <br />
-          <a class="secret" href={props.organizerUrl}>
-            {props.organizerUrl}
-          </a>
-        </p>
-      </div>
-    </Layout>
-  );
-}
-
 export function InvitationPage(props: { event: PublicEvent; displayTimeZone: string }) {
   const groups = groupCandidates(props.displayTimeZone, props.event.candidates);
   return (
@@ -339,22 +311,6 @@ export function InvitationPage(props: { event: PublicEvent; displayTimeZone: str
           <button id="submit-availability" type="submit">Submit availability</button>
         </form>
       ) : null}
-    </Layout>
-  );
-}
-
-export function SavedResponsePage(props: { responseUrl: string; receipt: string }) {
-  return (
-    <Layout title="Response saved" noReferrer>
-      <h1>Response saved</h1>
-      <p>{props.receipt}</p>
-      <div class="warn">
-        Keep this private edit link. A display name cannot recover it.
-        <br />
-        <a class="secret" href={props.responseUrl}>
-          {props.responseUrl}
-        </a>
-      </div>
     </Layout>
   );
 }

@@ -3,7 +3,6 @@ import type { Context } from "hono";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import * as schema from "./db/schema.ts";
 import { migrate } from "./db/migrate.ts";
 import { createStore } from "./db/store.ts";
@@ -167,9 +166,6 @@ Do not send calendar event titles, busy reasons, or raw calendar exports.
         : await store.saveIdempotency(key, record);
       return c.json(replayCreatePoll(persisted, hash), 201);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        return c.json({ error: { code: "validation", message: error.message } }, 400);
-      }
       return jsonError(c, error);
     }
   });

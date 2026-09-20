@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { z } from "zod";
 import { DomainError, isDomainError } from "../domain/errors.ts";
 
 const STATUS: Record<DomainError["code"], number> = {
@@ -18,6 +19,12 @@ export function errorPayload(error: unknown): { status: number; body: { error: {
       status: STATUS[error.code],
       body: { error: { code: error.code, message: error.message, details: error.details } },
     };
+  }
+  if (error instanceof z.ZodError) {
+    const message = error.issues
+      .map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`)
+      .join("; ");
+    return { status: 400, body: { error: { code: "validation", message, details: error.issues } } };
   }
   console.error(error);
   return {
